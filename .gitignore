@@ -1,0 +1,15 @@
+.DS_Store
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+renv/
+renv.lock
+inst/doc/
+*.html
+out.log
+data/
+# Large binary data files (too large for GitHub; use external storage)
+inst/extdata/*.h5
+inst/extdata/*.h5ad
+inst/extdata/*.npy

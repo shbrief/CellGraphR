@@ -1,0 +1,1674 @@
+---
+title: "EDA: Graph-based Features from Spatial Cell Data"
+author: "Sehyun Oh"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+vignette: >
+  %\VignetteIndexEntry{Graph Features EDA}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+output:
+  BiocStyle::html_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(comment = "#>", 
+                      collapse = TRUE, 
+                      message = FALSE, 
+                      warning = FALSE,
+                      fig.width = 10,
+                      fig.height = 7)
+```
+
+# Overview
+
+This vignette demonstrates exploratory data analysis (EDA) of graph-based 
+spatial features extracted from histopathology images. The data includes:
+
+- Graph summary statistics (degree, mixing index)
+- Cell type proportions and edge fractions
+- Multiscale graph features at different radii (r20, r40, r80, r100)
+- Smoothed embeddings from graph structure
+- Cell-level features with graph properties
+
+## Introduction to Graph-based Spatial Analysis
+
+### What is Graph-based Analysis?
+
+In spatial biology, tissue can be represented as a **graph (or network)** where:
+
+- **Nodes** = Individual cells (identified through segmentation)
+- **Edges** = Spatial relationships between cells (e.g., cells within a certain distance)
+- **Graph properties** = Quantitative metrics describing tissue organization
+
+This approach transforms complex spatial patterns into computable features that
+can be analyzed statistically and used for machine learning.
+
+### Why Use Graph-based Features?
+
+1. **Captures Spatial Context**: Unlike traditional cell counting, graphs encode
+   how cells are organized relative to each other
+2. **Biologically Meaningful**: Cell-cell interactions drive tumor progression,
+   immune responses, and treatment outcomes
+3. **Quantifiable**: Provides objective, reproducible metrics
+4. **Scalable**: Can analyze millions of cells across whole slide images
+5. **Multi-scale**: Examines organization at different spatial scales
+
+### Clinical Relevance
+
+Spatial organization patterns are associated with:
+
+- **Prognosis**: Survival outcomes in multiple cancer types
+- **Treatment Response**: Immunotherapy and targeted therapy efficacy
+- **Tumor Biology**: Invasion patterns, metastatic potential
+- **Immune Function**: T cell exhaustion, immune evasion mechanisms
+
+# Load Required Libraries
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+library(pheatmap)
+library(corrplot)
+library(RColorBrewer)
+library(ggridges)
+library(GGally)
+library(curatedTCGAData)
+library(kableExtra)
+library(readr)
+```
+
+# Terminology and Definitions
+
+## Key Graph Metrics
+
+### Degree
+
+**Definition**: The number of edges connected to a node (number of neighboring cells).
+
+- **Mean Degree**: Average number of neighbors per cell
+- **Higher values**: Denser cellular packing
+- **Lower values**: Sparse cell distribution
+- **Interpretation**: Reflects local cell density and tissue compactness
+
+### Mixing Index
+
+**Definition**: Measure of cell type diversity in local neighborhoods.
+
+- **Range**: 0 to 1
+- **Value = 0**: All neighbors are the same cell type (complete segregation)
+- **Value = 1**: Perfectly uniform distribution of all cell types (complete mixing)
+- **Value = 0.5**: Moderate mixing
+- **Interpretation**: Quantifies spatial clustering vs. intermixing of cell types
+
+**Biological Significance**:
+
+- High mixing (>0.7): Diverse microenvironments, active cell-cell interactions
+- Low mixing (<0.3): Segregated compartments, limited cross-talk
+- Intermediate mixing: Partial compartmentalization with interface regions
+
+### Edge Fraction
+
+**Definition**: Proportion of edges connecting two specific cell types.
+
+- **Formula**: (# edges between type A and B) / (total # edges)
+- **Diagonal values**: Homotypic interactions (same cell type)
+- **Off-diagonal values**: Heterotypic interactions (different cell types)
+- **Interpretation**: Reveals preferential associations or spatial exclusion
+
+## Cell Type Definitions
+
+### Neoplastic Cells
+
+- **Definition**: Malignant tumor cells
+- **Characteristics**: Atypical morphology, irregular nuclei
+- **Relevance**: Primary target for therapy, driver of disease
+
+### Inflammatory Cells
+
+- **Definition**: Immune cells (lymphocytes, macrophages, etc.)
+- **Function**: Anti-tumor immunity or pro-tumor inflammation
+- **Clinical Impact**: Predictive biomarker for immunotherapy
+
+### Stromal Cells
+
+- **Definition**: Fibroblasts, endothelial cells, support cells
+- **Function**: ECM production, angiogenesis, structural support
+- **Impact**: Can create physical barriers or promote invasion
+
+### Benign Epithelial
+
+- **Definition**: Normal epithelial cells
+- **Location**: Adjacent normal tissue
+- **Significance**: Reference for comparison to tumor
+
+### Necrotic Regions
+
+- **Definition**: Areas of cell death
+- **Causes**: Hypoxia, nutrient deprivation
+- **Implication**: Poor vascularization, aggressive disease
+
+## Spatial Scales
+
+Multiscale analysis examines features at different radii:
+
+- **r20 (20 μm)**: Immediate microenvironment (~2-3 cell diameters)
+  - Direct cell-cell contact
+  - Juxtacrine signaling
+  
+- **r40 (40 μm)**: Local neighborhood (~5-6 cell diameters)
+  - Paracrine signaling range
+  - Microenvironmental niche
+  
+- **r80 (80 μm)**: Tissue compartment (~10-12 cell diameters)
+  - Functional tissue units
+  - Structural organization
+  
+- **r100 (100 μm)**: Broader region (~15 cell diameters)
+  - Tissue-level architecture
+  - Compartment boundaries
+
+# Import Data
+## Load clinical metadata
+```{r}
+pc <- curatedTCGAData("PRAD", "RNAseq2Gene", version = "2.1.1", dry.run = FALSE)
+meta <- colData(pc)
+```
+
+
+## Load Graph Features Summary
+
+```{r load-summary}
+datDir <- system.file("extdata", package = "CellGraphR")
+
+# Graph features summary for single sample
+graph_summary <- read_csv(file.path(datDir, 
+  "TCGA-HI-7168-01Z-00-DX1.e4aabefc-b633-4f54-ae92-a839f2d80158_graph_features_summary.csv"))
+
+# Preview the data
+glimpse(graph_summary)
+```
+
+The graph summary contains:
+- Mean/std degree and mixing index
+- Proportion of each cell type
+- Edge fractions between all pairs of cell types
+
+## Load Multiscale Graph Features
+
+```{r load-multiscale}
+# Multiscale features across multiple samples
+multiscale_features <- read_csv(file.path(datDir, 
+  "tcga_multiscale_graph_features_per_slide.csv"))
+
+# Preview
+glimpse(multiscale_features)
+```
+
+This dataset contains mean degree and mixing index for each cell type at 
+different spatial scales (r20, r40, r80, r100 μm).
+
+## Load Graph Smooth Embedding
+
+```{r load-embedding}
+# Smoothed embedding from graph structure
+graph_embedding <- read_csv(file.path(datDir, 
+  "TCGA-HI-7168-01Z-00-DX1.e4aabefc-b633-4f54-ae92-a839f2d80158_graph_smooth_embedding.csv"))
+
+# Preview
+glimpse(graph_embedding)
+```
+
+## Load Cell-level Graph Features (h5ad)
+
+```{r load-h5ad, eval=FALSE}
+# Load h5ad file containing cell-level graph features
+# This requires the h5adToSe function from HistoImageR
+library(HistoImageR)
+
+h5ad_file <- file.path(datDir, 
+  "TCGA-HI-7168-01Z-00-DX1.e4aabefc-b633-4f54-ae92-a839f2d80158_with_graph_features.h5ad")
+
+if (file.exists(h5ad_file)) {
+  cell_graph_data <- h5adToSe(h5ad_file)
+  print(cell_graph_data)
+}
+```
+
+# EDA: Graph Summary Statistics
+
+## Overall Graph Properties
+
+```{r graph-properties}
+# Extract key statistics
+cat("Mean Degree:", graph_summary$mean_degree, "\n")
+cat("Std Degree:", graph_summary$std_degree, "\n")
+cat("Mean Mixing Index:", graph_summary$mean_mixing_index, "\n")
+cat("Std Mixing Index:", graph_summary$std_mixing_index, "\n")
+```
+
+### Interpretation of Graph Statistics
+
+**Mean Degree** (`r round(graph_summary$mean_degree, 2)`):
+
+- Each cell has an average of ~`r round(graph_summary$mean_degree, 1)` neighbors
+- This indicates **moderate cell density**
+- Typical range: 2-6 neighbors in 2D tissue sections
+- **Clinical Context**: Reflects tissue compactness and cellular organization
+
+**Standard Deviation of Degree** (`r round(graph_summary$std_degree, 2)`):
+
+- High variability (CV = `r round(graph_summary$std_degree/graph_summary$mean_degree*100, 1)`%) indicates **spatial heterogeneity**
+- Some regions are densely packed, others are sparse
+- **Biological Significance**: Heterogeneous density often associated with:
+  - Tumor invasive fronts (dense tumor, sparse stroma)
+  - Immune infiltration patterns (clustered vs. diffuse)
+  - Necrotic regions (sparse cells)
+
+**Mean Mixing Index** (`r round(graph_summary$mean_mixing_index, 2)`):
+
+- Value of ~`r round(graph_summary$mean_mixing_index, 2)` indicates **partial mixing**
+- Cell types are neither completely segregated nor uniformly mixed
+- Suggests presence of both:
+  - Homogeneous compartments (e.g., tumor nests, immune clusters)
+  - Interface regions with diverse cell types
+- **Therapeutic Implications**: Moderate mixing may facilitate immune-tumor interactions
+
+**Standard Deviation of Mixing Index** (`r round(graph_summary$std_mixing_index, 2)`):
+
+- High variability indicates **diverse microenvironmental niches**
+- Some regions show strong clustering, others show mixing
+- **Research Implications**: Spatial heterogeneity may contribute to:
+  - Treatment resistance (sanctuary sites)
+  - Clonal evolution
+  - Varied immune responses
+
+## Cell Type Composition
+
+```{r cell-type-composition}
+# Extract cell type proportions
+cell_types <- c("benign epithelial", "inflammatory", "necrotic", 
+                "neoplastic", "no label", "stromal")
+
+type_props <- graph_summary %>%
+  select(starts_with("prop_type_")) %>%
+  pivot_longer(everything(), 
+               names_to = "cell_type", 
+               values_to = "proportion") %>%
+  mutate(cell_type = gsub("prop_type_", "", cell_type))
+
+# Visualization
+ggplot(type_props, aes(x = reorder(cell_type, -proportion), 
+                       y = proportion, fill = cell_type)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none") +
+  labs(title = "Cell Type Composition",
+       x = "Cell Type",
+       y = "Proportion") +
+  scale_y_continuous(labels = scales::percent)
+```
+
+### Interpretation: Tumor Microenvironment Composition
+
+```{r composition-interpretation}
+# Calculate key metrics
+inflam_pct <- round(type_props$proportion[type_props$cell_type == "inflammatory"] * 100, 1)
+stromal_pct <- round(type_props$proportion[type_props$cell_type == "stromal"] * 100, 1)
+neoplastic_pct <- round(type_props$proportion[type_props$cell_type == "neoplastic"] * 100, 1)
+immune_stromal_ratio <- round(type_props$proportion[type_props$cell_type == "inflammatory"] / 
+                               type_props$proportion[type_props$cell_type == "stromal"], 2)
+```
+
+**Key Observations**:
+
+1. **Immune-Dominant Landscape** (`r inflam_pct`% inflammatory cells)
+   - **High immune infiltration** suggests active immune response
+   - May indicate "hot" tumor phenotype
+   - **Clinical Implication**: Potentially responsive to immunotherapy
+   - **Prognostic Value**: Often associated with better outcomes in many cancers
+
+2. **Abundant Stroma** (`r stromal_pct`% stromal cells)
+   - Extensive extracellular matrix and support structure
+   - **Desmoplastic reaction**: Fibrotic response to tumor
+   - **Dual Role**:
+     - Physical barrier to immune cells and drugs
+     - Source of growth factors and signaling molecules
+   - **Therapeutic Target**: Stromal modulation may enhance drug delivery
+
+3. **Low Neoplastic Fraction** (`r neoplastic_pct`% tumor cells)
+   - **Possible Interpretations**:
+     - Early stage disease with extensive reaction
+     - Highly infiltrated tumor with immune rejection
+     - Post-treatment sample with residual disease
+     - Sampling from tumor periphery rather than core
+   - **Important Note**: Low tumor content may affect molecular analyses (DNA/RNA)
+
+4. **Immune-to-Stromal Ratio** (`r immune_stromal_ratio`:1)
+   - Balanced immune-stromal compartments
+   - Suggests complex TME with multiple cell-cell interactions
+   - Ratio can predict treatment response in some cancer types
+
+**Clinical Context**:
+
+This TME composition profile (immune-high, stroma-high, tumor-low) is observed in:
+
+- Immunogenic tumors with strong host response
+- Response to prior therapy
+- Certain histological subtypes (e.g., medullary carcinoma)
+- Favorable prognostic subset in multiple cancer types
+
+## Edge Fraction Heatmap
+
+Visualize the connectivity between different cell types:
+
+```{r edge-fraction-heatmap, fig.width=10, fig.height=8}
+# Extract edge fractions
+edge_fracs <- graph_summary %>%
+  select(starts_with("edge_frac_")) %>%
+  pivot_longer(everything(), 
+               names_to = "edge_type", 
+               values_to = "fraction") %>%
+  mutate(
+    # Remove "edge_frac_" prefix and split on remaining underscores
+    edge_type = gsub("^edge_frac_", "", edge_type)
+  ) %>%
+  separate(edge_type, 
+           into = c("from", "to"), 
+           sep = "_(?=[^_]*$)",  # Split on last underscore
+           extra = "merge") %>%
+  mutate(
+    from = gsub("_", " ", from),
+    to = gsub("_", " ", to)
+  )
+
+# Create matrix for heatmap
+edge_matrix <- edge_fracs %>%
+  pivot_wider(names_from = to, values_from = fraction) %>%
+  column_to_rownames("from") %>%
+  as.matrix()
+
+# Plot heatmap
+pheatmap(edge_matrix,
+         main = "Edge Fractions Between Cell Types",
+         color = colorRampPalette(c("white", "navy"))(100),
+         display_numbers = TRUE,
+         number_format = "%.3f",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         fontsize = 10,
+         angle_col = 45)
+```
+
+### Interpretation: Cell-Cell Interaction Patterns
+
+**Reading the Heatmap**:
+
+- **Rows**: Source cell type
+- **Columns**: Target cell type (neighbor)
+- **Values**: Fraction of all edges connecting these two types
+- **Diagonal**: Homotypic interactions (same type neighbors)
+- **Off-diagonal**: Heterotypic interactions (different type neighbors)
+
+```{r edge-interpretation, echo=FALSE}
+# Extract key interaction patterns
+# Check if matrix has correct row/column names
+if ("inflammatory" %in% rownames(edge_matrix)) {
+  inflam_self <- edge_matrix["inflammatory", "inflammatory"]
+  stromal_self <- edge_matrix["stromal", "stromal"]
+  inflam_stromal <- edge_matrix["inflammatory", "stromal"]
+  neoplastic_self <- edge_matrix["neoplastic", "neoplastic"]
+  inflam_neoplastic <- edge_matrix["inflammatory", "neoplastic"]
+} else {
+  # Matrix might not be square or names might be different
+  # Find the actual names
+  cell_type_names <- rownames(edge_matrix)
+  cat("Available cell types:", paste(cell_type_names, collapse=", "), "\n")
+  
+  # Use flexible matching
+  inflam_idx <- grep("inflam", cell_type_names, ignore.case=TRUE)[1]
+  stromal_idx <- grep("stromal", cell_type_names, ignore.case=TRUE)[1]
+  neopl_idx <- grep("neopl", cell_type_names, ignore.case=TRUE)[1]
+  
+  inflam_self <- edge_matrix[inflam_idx, inflam_idx]
+  stromal_self <- edge_matrix[stromal_idx, stromal_idx]
+  inflam_stromal <- edge_matrix[inflam_idx, stromal_idx]
+  neoplastic_self <- edge_matrix[neopl_idx, neopl_idx]
+  inflam_neoplastic <- edge_matrix[inflam_idx, neopl_idx]
+}
+```
+
+**Major Interaction Patterns**:
+
+1. **Inflammatory Self-Clustering** (`r round(inflam_self*100, 1)`%)
+   - **Highest edge fraction**: Inflammatory cells preferentially neighbor each other
+   - **Biological Meaning**:
+     - Formation of lymphoid aggregates or tertiary lymphoid structures (TLS)
+     - Coordinated immune response
+     - Potential immune sanctuaries
+   - **Clinical Significance**: TLS associated with favorable prognosis and immunotherapy response
+
+2. **Stromal Networks** (`r round(stromal_self*100, 1)`%)
+   - Strong stromal-stromal connectivity
+   - **Interpretation**: Fibrous tissue forming continuous networks
+   - **Functional Impact**:
+     - Creates architectural framework
+     - May impede immune cell migration
+     - Affects drug penetration
+
+3. **Immune-Stromal Interface** (`r round(inflam_stromal*100, 1)`%)
+   - Substantial inflammatory-stromal edges
+   - **Biological Processes**:
+     - Immune cells trafficking through stroma
+     - Cytokine-mediated remodeling
+     - Stromal-immune crosstalk
+   - **Therapeutic Implications**: Target for combination therapies (immune + stromal modulation)
+
+4. **Limited Tumor Cell Connectivity** (`r round(neoplastic_self*100, 1)`%)
+   - Low neoplastic-neoplastic interactions
+   - **Possible Explanations**:
+     - Infiltrative growth pattern (single cells or small clusters)
+     - Tumor cells dispersed among stromal/immune compartments
+     - Early invasion with disseminated cells
+   - **Clinical Relevance**: Infiltrative patterns often more aggressive
+
+5. **Immune-Tumor Contact** (`r round(inflam_neoplastic*100, 1)`%)
+   - Moderate inflammatory-neoplastic edges
+   - **Interpretation**: Active immune surveillance
+   - **Context-Dependent**:
+     - Could be anti-tumor immunity (good)
+     - Could be immunosuppressive environment (bad)
+     - Requires functional immune profiling to distinguish
+
+**Spatial Organization Summary**:
+
+The edge pattern reveals a **compartmentalized yet interactive TME**:
+
+- **Immune compartment**: Self-organizing clusters
+- **Stromal compartment**: Continuous networks
+- **Tumor cells**: Scattered, highly exposed to immune/stromal interactions
+- **Interface zones**: Active immune-stromal and immune-tumor interactions
+
+This architecture suggests potential for:
+
+- Immune-mediated tumor control
+- Therapeutic vulnerabilities at interface regions
+- Stromal-mediated treatment resistance
+
+# EDA: Multiscale Features
+
+## Overview of Samples
+
+```{r sample-overview}
+cat("Number of samples:", nrow(multiscale_features), "\n")
+cat("Number of features:", ncol(multiscale_features) - 1, "\n")
+cat("\nSample IDs:\n")
+print(multiscale_features$slide_id)
+```
+
+## Feature Distribution by Scale
+
+Examine how features vary across different spatial scales:
+
+```{r feature-by-scale, fig.width=12, fig.height=8}
+# Extract degree features across scales
+degree_data <- multiscale_features %>%
+  select(slide_id, matches("mean_deg.*_r\\d+")) %>%
+  pivot_longer(-slide_id, 
+               names_to = "feature", 
+               values_to = "degree") %>%
+  separate(feature, 
+           into = c("stat", "type1", "cell_type", "radius"),
+           sep = "_",
+           extra = "merge") %>%
+  mutate(
+    cell_type = gsub("_r\\d+$", "", cell_type),
+    radius = as.numeric(gsub("r", "", radius))
+  )
+
+# Plot
+ggplot(degree_data, 
+       aes(x = factor(radius), y = degree, color = cell_type, group = cell_type)) +
+  geom_line(stat = "summary", fun = "mean", size = 1) +
+  geom_point(stat = "summary", fun = "mean", size = 3) +
+  facet_wrap(~ slide_id, scales = "free_y", ncol = 2) +
+  scale_color_brewer(palette = "Set2") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title = "Mean Degree by Cell Type Across Spatial Scales",
+       x = "Radius (μm)",
+       y = "Mean Degree",
+       color = "Cell Type")
+```
+
+### Interpretation: Scale-Dependent Connectivity
+
+**What Does Degree Tell Us?**
+
+- **Degree = connectivity**: Number of cells within specified radius
+- **Increases with radius**: Larger neighborhoods contain more cells
+- **Cell type differences**: Reflect both abundance and spatial distribution
+
+**Key Patterns to Observe**:
+
+1. **Linear vs. Non-linear Scaling**:
+   - **Linear increase**: Uniform cell distribution
+   - **Non-linear (plateau)**: Boundaries or compartmentalization
+   - **Rapid increase then plateau**: Dense local clusters, sparse between
+
+2. **Cell Type Rankings**:
+   - **Highest degree**: Most abundant cell types (inflammatory, stromal)
+   - **Lowest degree**: Rare cell types (neoplastic, necrotic)
+   - **Consistent ranking**: Maintained spatial hierarchy
+
+3. **Inter-Sample Variability**:
+   - **Similar patterns**: Conserved tissue architecture
+   - **Different patterns**: Distinct TME phenotypes
+   - **Scale-specific differences**: Organization at specific spatial scales
+
+**Biological Insights**:
+
+- **Inflammatory cells** (high degree at all scales):
+  - Widely distributed throughout tissue
+  - Form dense local clusters
+  - Infiltrate multiple compartments
+
+- **Stromal cells** (moderate, consistent degree):
+  - Evenly distributed networks
+  - Continuous tissue framework
+  - Scale-independent organization
+
+- **Neoplastic cells** (low degree):
+  - Sparse distribution or small clusters
+  - Limited expansion at larger scales
+  - Suggests infiltrative rather than expansive growth
+
+**Clinical Implications**:
+
+- **Scale-dependent features** may capture different biological processes
+- **20 μm**: Direct cell-cell contact (signaling)
+- **40-80 μm**: Microenvironmental niches (metabolic gradients)
+- **100 μm**: Tissue architecture (compartment organization)
+
+## Mixing Index Across Scales
+
+```{r mixing-index-scale, fig.width=12, fig.height=8}
+# Extract mixing index features
+mixing_data <- multiscale_features %>%
+  select(slide_id, matches("mean_mix.*_r\\d+")) %>%
+  pivot_longer(-slide_id, 
+               names_to = "feature", 
+               values_to = "mixing_index") %>%
+  separate(feature, 
+           into = c("stat1", "stat2", "cell_type", "radius"),
+           sep = "_",
+           extra = "merge") %>%
+  mutate(
+    cell_type = gsub("_r\\d+$", "", cell_type),
+    radius = as.numeric(gsub("r", "", radius))
+  )
+
+# Plot
+ggplot(mixing_data, 
+       aes(x = factor(radius), y = mixing_index, color = cell_type, group = cell_type)) +
+  geom_line(stat = "summary", fun = "mean", size = 1) +
+  geom_point(stat = "summary", fun = "mean", size = 3) +
+  facet_wrap(~ slide_id, scales = "free_y", ncol = 2) +
+  scale_color_brewer(palette = "Set2") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title = "Mixing Index by Cell Type Across Spatial Scales",
+       x = "Radius (μm)",
+       y = "Mean Mixing Index",
+       color = "Cell Type")
+```
+
+### Interpretation: Scale-Dependent Cell Type Mixing
+
+**Understanding Mixing Index Trends**:
+
+- **Increasing with scale**: Cell type becomes more intermixed at larger distances
+  - Local clustering (same type) but regional diversity
+  - Example: Tumor nests (low mixing locally) within diverse stroma (high mixing regionally)
+
+- **Decreasing with scale**: Cell type segregation increases at larger distances
+  - Compartmentalized tissue architecture
+  - Distinct regions dominated by single cell type
+
+- **Stable across scales**: Consistent mixing pattern
+  - Uniform distribution at all scales
+  - Well-mixed compartment
+
+**Typical Patterns by Cell Type**:
+
+1. **Inflammatory Cells** (often high, increasing mixing):
+   - Can form local clusters (lymphoid aggregates)
+   - But infiltrate broadly (high regional mixing)
+   - Scale increase reflects transition from cluster to infiltration
+
+2. **Stromal Cells** (moderate, stable mixing):
+   - Distributed throughout tissue
+   - Continuous network architecture
+   - Consistent mixing reflects uniform distribution
+
+3. **Neoplastic Cells** (low, variable mixing):
+   - Often form tumor nests (low mixing locally)
+   - May remain segregated at larger scales (invasive front)
+   - Or become more mixed (infiltrative pattern)
+   - Pattern reveals growth mechanism
+
+**Clinical Significance**:
+
+- **High mixing at small scales**: Direct cell-cell interactions
+  - Immune-tumor contact (immunotherapy targets)
+  - Stromal-tumor contact (invasion facilitators)
+
+- **Low mixing at small scales**: Compartmentalization
+  - Tumor sanctuary from immune surveillance
+  - Limited therapeutic access
+
+- **Scale-dependent transitions**: Hierarchical organization
+  - Local homogeneity + regional heterogeneity
+  - Multiple therapeutic vulnerabilities
+
+**Research Applications**:
+
+- **Biomarker Development**: Different scales predict different outcomes
+- **Treatment Planning**: Target interfaces (high mixing) vs. compartments (low mixing)
+- **Disease Monitoring**: Changes in mixing patterns reflect treatment response
+
+## Heatmap of All Features
+
+```{r feature-heatmap, fig.width=12, fig.height=10}
+# Prepare data for heatmap
+heatmap_data <- multiscale_features %>%
+  column_to_rownames("slide_id") %>%
+  as.matrix()
+
+# Normalize by column (z-score)
+heatmap_data_scaled <- scale(heatmap_data)
+
+# Plot
+pheatmap(heatmap_data_scaled,
+         main = "Multiscale Graph Features (Z-scored)",
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "ward.D2",
+         show_colnames = FALSE,
+         fontsize = 10,
+         angle_col = 45)
+```
+
+## Correlation Analysis
+
+```{r correlation-analysis, fig.width=10, fig.height=10}
+# Calculate correlation matrix
+cor_matrix <- cor(multiscale_features %>% select(-slide_id), 
+                  use = "pairwise.complete.obs")
+
+# Plot correlation matrix (subset for visibility)
+# Select every 5th feature to reduce clutter
+idx <- seq(1, ncol(cor_matrix), by = 5)
+corrplot(cor_matrix[idx, idx],
+         method = "color",
+         type = "upper",
+         tl.col = "black",
+         tl.cex = 0.6,
+         title = "Feature Correlations (Subset)",
+         mar = c(0, 0, 2, 0))
+```
+
+### Interpretation: Feature Correlations
+
+**Understanding the Correlation Matrix**:
+
+- **Blue**: Positive correlation (features increase together)
+- **Red**: Negative correlation (one increases, other decreases)
+- **White**: No correlation (features independent)
+- **Intensity**: Strength of correlation
+
+**What to Look For**:
+
+1. **Blocks of High Correlation**:
+   - Features that co-vary across samples
+   - May represent:
+     - Same biological process at different scales
+     - Coordinated cellular programs
+     - Redundant measurements (can reduce dimensionality)
+
+2. **Negative Correlations**:
+   - Trade-offs or mutual exclusion
+   - Example: High tumor mixing negatively correlates with tumor segregation
+   - Biological constraints (limited space, competitive processes)
+
+3. **Uncorrelated Features**:
+   - Independent aspects of tissue organization
+   - Provide complementary information
+   - Both needed for complete characterization
+
+**Biological Examples**:
+
+1. **Degree Features Across Scales** (positive correlation):
+   - Samples with high degree at r20 also high at r100
+   - Consistent density across scales
+   - Reflects overall tissue cellularity
+
+2. **Tumor vs. Immune Features** (may be negative):
+   - High tumor presence, low immune infiltration (cold tumors)
+   - Or vice versa (hot tumors)
+   - Fundamental TME phenotype distinction
+
+3. **Same Cell Type Across Metrics** (positive):
+   - Cell type's degree correlates with its mixing
+   - Abundant cell types have more neighbors AND mix more
+
+**Applications**:
+
+- **Feature Selection**: Remove highly correlated features (redundant)
+- **Feature Engineering**: Combine correlated features into composite scores
+- **Biological Insight**: Correlation structure reveals tissue organization principles
+- **Quality Control**: Expected correlations validate data quality
+
+## PCA Analysis
+
+```{r pca-analysis, fig.width=12, fig.height=5}
+# Perform PCA
+pca_result <- prcomp(multiscale_features %>% select(-slide_id), 
+                     center = TRUE, 
+                     scale. = TRUE)
+
+# Variance explained
+var_explained <- summary(pca_result)$importance[2, ]
+
+# PCA scores
+pca_scores <- as.data.frame(pca_result$x) %>%
+  mutate(slide_id = multiscale_features$slide_id)
+
+# Plot
+p1 <- ggplot(pca_scores, aes(x = PC1, y = PC2, label = slide_id)) +
+  geom_point(size = 3, color = "steelblue") +
+  geom_text(vjust = -0.5, hjust = 0.5, size = 2.5) +
+  theme_bw() +
+  labs(title = "PCA of Multiscale Graph Features",
+       x = paste0("PC1 (", round(var_explained[1] * 100, 1), "%)"),
+       y = paste0("PC2 (", round(var_explained[2] * 100, 1), "%)"))
+
+# Scree plot
+p2 <- data.frame(
+  PC = 1:min(10, length(var_explained)),
+  Variance = var_explained[1:min(10, length(var_explained))]
+) %>%
+  ggplot(aes(x = PC, y = Variance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_line(color = "red") +
+  geom_point(color = "red", size = 2) +
+  theme_bw() +
+  labs(title = "Scree Plot",
+       x = "Principal Component",
+       y = "Proportion of Variance Explained") +
+  scale_x_continuous(breaks = 1:10)
+
+p1 + p2
+```
+
+### Interpretation: Principal Components Analysis
+
+**What Does PCA Tell Us?**
+
+PCA identifies the **major axes of variation** across samples:
+
+- **PC1**: Primary source of difference between samples
+- **PC2**: Secondary source of variation (orthogonal to PC1)
+- **Variance explained**: How much information each PC captures
+
+**Reading the Plots**:
+
+**Scree Plot** (right):
+
+- Shows variance explained by each PC
+- **Steep drop**: First few PCs capture most variation
+- **Elbow point**: Meaningful PCs vs. noise
+- **Interpretation**: If first 2-3 PCs explain >60%, samples differ in few major ways
+
+**PCA Score Plot** (left):
+
+- Each point = one sample
+- **Distance between points**: Similarity (close = similar, far = different)
+- **Clusters**: Samples with similar spatial phenotypes
+- **Outliers**: Unusual spatial organization
+
+**Biological Meaning**:
+
+1. **Separation along PC1**: 
+   - Fundamental difference in tissue organization
+   - Could reflect:
+     - Disease stage (early vs. advanced)
+     - Histological subtype
+     - Treatment status (naive vs. treated)
+     - Anatomical location
+
+2. **Separation along PC2**:
+   - Secondary source of variation
+   - Often captures:
+     - Immune infiltration patterns (hot vs. cold)
+     - Stromal content (desmoplastic vs. cellular)
+     - Tumor growth pattern (expansive vs. infiltrative)
+
+3. **Clustering of samples**:
+   - Identifies spatial phenotypes
+   - Samples in same cluster have similar TME organization
+   - Could define patient subgroups for precision medicine
+
+**Clinical Applications**:
+
+- **Patient Stratification**: PCA clusters may have different outcomes
+- **Biomarker Discovery**: Features driving PC1/PC2 are most discriminating
+- **Quality Control**: Outliers may indicate technical artifacts
+- **Treatment Selection**: Different clusters may respond to different therapies
+
+## Top Contributing Features to PC1 and PC2
+
+```{r pca-loadings, fig.width=10, fig.height=6}
+# Extract loadings
+loadings <- as.data.frame(pca_result$rotation[, 1:2])
+loadings$feature <- rownames(loadings)
+
+# Top features for PC1
+top_pc1 <- loadings %>%
+  arrange(desc(abs(PC1))) %>%
+  head(20)
+
+# Top features for PC2
+top_pc2 <- loadings %>%
+  arrange(desc(abs(PC2))) %>%
+  head(20)
+
+# Plot
+p1 <- ggplot(top_pc1, aes(x = reorder(feature, PC1), y = PC1)) +
+  geom_bar(stat = "identity", fill = "coral") +
+  coord_flip() +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 8)) +
+  labs(title = "Top 20 Features Contributing to PC1",
+       x = "", y = "Loading")
+
+p2 <- ggplot(top_pc2, aes(x = reorder(feature, PC2), y = PC2)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 8)) +
+  labs(title = "Top 20 Features Contributing to PC2",
+       x = "", y = "Loading")
+
+p1 / p2
+```
+
+### Interpretation: Feature Importance
+
+**Understanding Loadings**:
+
+- **Loadings** = contribution of each original feature to principal components
+- **Magnitude** (absolute value): How much the feature contributes
+- **Sign** (positive/negative): Direction of contribution
+- **Top features**: Most important for distinguishing samples
+
+**How to Interpret**:
+
+1. **High Positive Loading on PC1**:
+   - Samples with high PC1 scores have high values of this feature
+   - Feature increases along PC1 axis
+
+2. **High Negative Loading on PC1**:
+   - Samples with high PC1 scores have low values of this feature
+   - Feature decreases along PC1 axis
+
+3. **Features with Similar Loadings**:
+   - Tend to vary together across samples
+   - May represent coordinated biological processes
+
+**Biological Interpretation Strategy**:
+
+1. **Identify top features**:
+   - Which cell types?
+   - Which spatial scales?
+   - Degree or mixing metrics?
+
+2. **Look for patterns**:
+   - Do top features cluster by cell type?
+   - Are specific scales over-represented?
+   - Do homotypic or heterotypic interactions dominate?
+
+3. **Generate hypotheses**:
+   - PC1 dominated by inflammatory features → immune variation is primary axis
+   - PC1 dominated by large-scale features → tissue architecture varies most
+   - PC2 dominated by tumor features → tumor cell organization is secondary axis
+
+**Example Interpretations**:
+
+- **If inflammatory mixing at r100 is top feature**:
+  - Major sample differences in large-scale immune distribution
+  - Some samples have diffuse immune infiltration
+  - Others have focal immune clusters
+  - Clinical correlation: May predict immunotherapy response
+
+- **If stromal degree at r20 is top feature**:
+  - Samples differ in local stromal density
+  - Desmoplastic vs. cellular stroma
+  - Clinical correlation: May affect drug penetration
+
+**Research Applications**:
+
+- **Feature Selection**: Use top loading features for machine learning
+- **Hypothesis Generation**: Features suggest biological processes to investigate
+- **Validation**: Confirm importance in independent cohorts
+
+# EDA: Graph Smooth Embedding
+
+```{r embedding-analysis}
+# Display embedding statistics
+summary(graph_embedding)
+
+# Check data structure
+glimpse(graph_embedding)
+```
+
+The smoothed embedding represents aggregated features from the graph structure, 
+capturing information about cell type composition, spatial arrangement, and 
+intensity characteristics.
+
+```{r embedding-visualization, fig.width=12, fig.height=8}
+# Prepare data for visualization
+embedding_long <- graph_embedding %>%
+  select(-1) %>%  # Remove index column if present
+  pivot_longer(everything(), 
+               names_to = "feature", 
+               values_to = "value")
+
+# Create feature groups
+embedding_long <- embedding_long %>%
+  mutate(
+    feature_group = case_when(
+      str_detect(feature, "type_") ~ "Cell Type",
+      str_detect(feature, "intensity") ~ "Intensity",
+      str_detect(feature, "nearest_neighbor") ~ "Spatial",
+      str_detect(feature, "degree") ~ "Graph Topology",
+      str_detect(feature, "mixing") ~ "Graph Topology",
+      TRUE ~ "Other"
+    )
+  )
+
+# Visualize feature distributions
+ggplot(embedding_long, aes(x = feature, y = value, fill = feature_group)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ feature_group, scales = "free", ncol = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        legend.position = "none") +
+  labs(title = "Graph Smooth Embedding Features",
+       x = "", y = "Value")
+```
+
+# Comparative Analysis
+
+## Degree vs Mixing Index Relationship
+
+```{r degree-mixing-relationship, fig.width=10, fig.height=6}
+# Combine data for relationship analysis
+degree_summary <- degree_data %>%
+  group_by(slide_id, cell_type) %>%
+  summarize(mean_degree = mean(degree, na.rm = TRUE), .groups = "drop")
+
+mixing_summary <- mixing_data %>%
+  group_by(slide_id, cell_type) %>%
+  summarize(mean_mixing = mean(mixing_index, na.rm = TRUE), .groups = "drop")
+
+combined <- left_join(degree_summary, mixing_summary, 
+                     by = c("slide_id", "cell_type"))
+
+# Plot
+ggplot(combined, aes(x = mean_degree, y = mean_mixing, color = cell_type)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2) +
+  facet_wrap(~ cell_type, scales = "free") +
+  scale_color_brewer(palette = "Set2") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  labs(title = "Degree vs Mixing Index Relationship by Cell Type",
+       x = "Mean Degree (across scales)",
+       y = "Mean Mixing Index (across scales)")
+```
+
+# Multi-modal Analysis
+
+## Clinical Metadata Integration
+
+### Load and Display Clinical Data
+
+```{r load-clinical}
+ids <- multiscale_features$slide_id %>% sub("^(TCGA-[0-9A-Z]{2}-[0-9A-Z]{4}).*", "\\1", .)
+meta_sub <- meta[meta$patientID %in% ids,]
+
+# Check available columns and create summary with safe column access
+get_col_safe <- function(df, colname) {
+  if (colname %in% colnames(df)) {
+    return(df[[colname]])
+  } else {
+    return(rep(NA, nrow(df)))
+  }
+}
+
+# Display key clinical variables
+clinical_summary <- data.frame(
+  Patient = meta_sub$patientID,
+  Age = get_col_safe(meta_sub, "years_to_birth") * -1,
+  Race = get_col_safe(meta_sub, "race"),
+  Stage = get_col_safe(meta_sub, "pathology_T_stage"),
+  Gleason_Score = get_col_safe(meta_sub, "gleason_score"),
+  PSA = get_col_safe(meta_sub, "PSA"),
+  Vital_Status = get_col_safe(meta_sub, "vital_status"),
+  Days_to_Death = get_col_safe(meta_sub, "days_to_death"),
+  Days_to_Followup = get_col_safe(meta_sub, "days_to_last_followup"),
+  ERG_status = get_col_safe(meta_sub, "ERG_status")
+)
+
+kable(clinical_summary, 
+      caption = "Clinical Characteristics of Analyzed Samples",
+      align = "lcccccccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 10)
+```
+
+### Clinical Context: Prostate Cancer Cohort
+
+These samples represent **prostate adenocarcinoma (PRAD)** cases from TCGA:
+
+**Key Clinical Variables**:
+
+- **Gleason Score**: Histological grading system (6-10)
+  - 6: Well-differentiated, low grade
+  - 7: Intermediate grade
+  - 8-10: Poorly differentiated, high grade
+  - Higher scores correlate with aggressive disease
+
+- **Pathology T Stage**: Extent of primary tumor
+  - T2: Confined to prostate
+  - T3: Extends beyond prostate capsule
+  - T4: Invades adjacent structures
+
+- **PSA**: Prostate-specific antigen (tumor marker)
+  - Normal: <4 ng/mL
+  - Elevated: >10 ng/mL suggests higher tumor burden
+
+### Linking Spatial Features to Clinical Outcomes
+
+```{r clinical-spatial-integration}
+# Get available clinical columns
+available_cols <- colnames(meta_sub)
+clinical_cols <- c("patientID", "gleason_score", "pathology_T_stage", "PSA", 
+                   "vital_status", "days_to_death", "days_to_last_followup", 
+                   "years_to_birth", "race", "ERG_status")
+cols_to_select <- intersect(clinical_cols, available_cols)
+
+# Add clinical data to multiscale features
+multiscale_clinical <- multiscale_features %>%
+  mutate(patientID = sub("^(TCGA-[0-9A-Z]{2}-[0-9A-Z]{4}).*", "\\1", slide_id)) %>%
+  left_join(
+    meta_sub %>% 
+      as.data.frame() %>%
+      select(all_of(cols_to_select)),
+    by = "patientID"
+  )
+
+# Add derived categorical variables if base columns exist
+if ("gleason_score" %in% colnames(multiscale_clinical)) {
+  multiscale_clinical <- multiscale_clinical %>%
+    mutate(
+      Gleason_Category = case_when(
+        is.na(gleason_score) ~ "Unknown",
+        gleason_score <= 6 ~ "Low (6)",
+        gleason_score == 7 ~ "Intermediate (7)",
+        gleason_score >= 8 ~ "High (8-10)",
+        TRUE ~ "Unknown"
+      )
+    )
+}
+
+if ("pathology_T_stage" %in% colnames(multiscale_clinical)) {
+  multiscale_clinical <- multiscale_clinical %>%
+    mutate(
+      T_Stage_Group = case_when(
+        is.na(pathology_T_stage) ~ "Unknown",
+        grepl("T2", pathology_T_stage) ~ "T2 (Confined)",
+        grepl("T3", pathology_T_stage) ~ "T3 (Extraprostatic)",
+        grepl("T4", pathology_T_stage) ~ "T4 (Invasive)",
+        TRUE ~ "Unknown"
+      )
+    )
+}
+
+if ("PSA" %in% colnames(multiscale_clinical)) {
+  multiscale_clinical <- multiscale_clinical %>%
+    mutate(
+      PSA_Category = case_when(
+        is.na(PSA) ~ "Unknown",
+        PSA < 4 ~ "Normal (<4)",
+        PSA >= 4 & PSA < 10 ~ "Elevated (4-10)",
+        PSA >= 10 ~ "High (≥10)",
+        TRUE ~ "Unknown"
+      )
+    )
+}
+
+if ("years_to_birth" %in% colnames(multiscale_clinical)) {
+  multiscale_clinical <- multiscale_clinical %>%
+    mutate(Age = years_to_birth * -1)
+}
+
+# Display integration summary
+n_with_gleason <- sum(!is.na(multiscale_clinical$gleason_score) & 
+                      multiscale_clinical$gleason_score != "Unknown")
+cat("Successfully integrated clinical data for", nrow(multiscale_clinical), "samples\n")
+if ("gleason_score" %in% colnames(multiscale_clinical)) {
+  cat("Samples with Gleason score:", n_with_gleason, "\n")
+}
+```
+
+
+
+## Clinical-Spatial Correlation Analysis
+
+### Spatial Features by Gleason Score
+
+```{r spatial-by-gleason, fig.width=12, fig.height=8, eval="Gleason_Category" %in% colnames(multiscale_clinical)}
+# Check if we have Gleason score data
+if ("Gleason_Category" %in% colnames(multiscale_clinical)) {
+  # Extract key spatial features for comparison
+  spatial_summary <- subset(multiscale_clinical, 
+       !is.na(gleason_score) & Gleason_Category != "Unknown") %>%
+    select(patientID, Gleason_Category, 
+           matches("mean_deg_inflammatory_r100"),
+           matches("mean_deg_neoplastic_r100"),
+           matches("mean_mix_inflammatory_r100"),
+           matches("mean_mix_neoplastic_r100")) %>%
+    pivot_longer(cols = -c(patientID, Gleason_Category),
+                 names_to = "Feature",
+                 values_to = "Value") %>%
+    mutate(
+      Feature_Label = case_when(
+        grepl("deg_inflammatory", Feature) ~ "Inflammatory Degree (r100)",
+        grepl("deg_neoplastic", Feature) ~ "Neoplastic Degree (r100)",
+        grepl("mix_inflammatory", Feature) ~ "Inflammatory Mixing (r100)",
+        grepl("mix_neoplastic", Feature) ~ "Neoplastic Mixing (r100)",
+        TRUE ~ Feature
+      )
+    )
+  
+  if (nrow(spatial_summary) > 0) {
+    ggplot(spatial_summary, aes(x = Gleason_Category, y = Value, fill = Gleason_Category)) +
+      geom_boxplot() +
+      geom_point(position = position_jitter(width = 0.2), alpha = 0.6) +
+      facet_wrap(~ Feature_Label, scales = "free_y", ncol = 2) +
+      scale_fill_brewer(palette = "YlOrRd") +
+      theme_bw() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position = "none") +
+      labs(title = "Spatial Features by Gleason Score",
+           subtitle = "100 μm radius features",
+           x = "Gleason Score Category",
+           y = "Feature Value")
+  } else {
+    cat("No Gleason score data available for spatial analysis\n")
+  }
+} else {
+  cat("Gleason score not available in clinical data\n")
+}
+```
+
+### Interpretation: Spatial Organization and Tumor Grade
+
+**Clinical Significance of Gleason Score**:
+
+- **Low Grade (≤6)**: Well-differentiated, gland-forming architecture
+- **Intermediate (7)**: Mixed differentiation, common grade
+- **High Grade (≥8)**: Poorly differentiated, loss of glandular structure
+
+**Expected Spatial Patterns by Grade**:
+
+1. **Inflammatory Features**:
+   - **Higher grade**: May show increased immune infiltration (response to more aggressive tumor)
+   - **Lower grade**: May have less immune response
+   - **Mixing**: Higher in aggressive tumors (breakdown of tissue barriers)
+
+2. **Neoplastic Features**:
+   - **Higher grade**: More dispersed distribution (infiltrative growth)
+   - **Lower grade**: Organized tumor nests (glandular architecture)
+   - **Degree patterns**: Reflect growth pattern differences
+
+**Observed Patterns**:
+
+```{r gleason-observations, eval=exists("spatial_summary") && nrow(spatial_summary) > 0}
+# Calculate mean differences if spatial_summary exists
+if (exists("spatial_summary") && nrow(spatial_summary) > 0) {
+  gleason_means <- spatial_summary %>%
+    group_by(Gleason_Category, Feature_Label) %>%
+    summarize(Mean_Value = mean(Value, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = Gleason_Category, values_from = Mean_Value)
+  
+  kable(gleason_means,
+        caption = "Mean Spatial Features by Gleason Grade",
+        digits = 2) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                  full_width = FALSE)
+} else {
+  cat("Spatial summary data not available for Gleason analysis\n")
+}
+```
+
+**Clinical Implications**:
+
+- Spatial features may complement Gleason scoring
+- Quantitative metrics could improve risk stratification
+- Differences suggest grade-specific microenvironmental phenotypes
+
+### PCA with Clinical Annotation
+
+```{r pca-clinical, fig.width=12, fig.height=5}
+# Perform PCA with clinical annotation
+# Select only columns that exist in multiscale_clinical
+clinical_cols_available <- c("slide_id", "Gleason_Category", "T_Stage_Group", "PSA_Category", "Age", "ERG_status")
+clinical_cols_present <- intersect(clinical_cols_available, colnames(multiscale_clinical))
+
+pca_scores_clinical <- as.data.frame(pca_result$x) %>%
+  mutate(slide_id = multiscale_features$slide_id) %>%
+  left_join(
+    multiscale_clinical %>% select(all_of(clinical_cols_present)),
+    by = "slide_id"
+  )
+
+# Create plots based on available clinical variables
+has_gleason <- "Gleason_Category" %in% colnames(pca_scores_clinical)
+has_tstage <- "T_Stage_Group" %in% colnames(pca_scores_clinical)
+has_psa <- "PSA_Category" %in% colnames(pca_scores_clinical)
+has_age <- "Age" %in% colnames(pca_scores_clinical)
+
+# Plot 1: Gleason and T Stage (if available)
+if (has_gleason && has_tstage) {
+  p1 <- ggplot(pca_scores_clinical, aes(x = PC1, y = PC2, color = Gleason_Category, shape = T_Stage_Group)) +
+    geom_point(size = 4, alpha = 0.8) +
+    scale_color_brewer(palette = "YlOrRd") +
+    theme_bw() +
+    labs(title = "PCA colored by Gleason Score and T Stage",
+         x = paste0("PC1 (", round(var_explained[1] * 100, 1), "%)"),
+         y = paste0("PC2 (", round(var_explained[2] * 100, 1), "%)"),
+         color = "Gleason Grade",
+         shape = "T Stage")
+} else if (has_gleason) {
+  p1 <- ggplot(pca_scores_clinical, aes(x = PC1, y = PC2, color = Gleason_Category)) +
+    geom_point(size = 4, alpha = 0.8) +
+    scale_color_brewer(palette = "YlOrRd") +
+    theme_bw() +
+    labs(title = "PCA colored by Gleason Score",
+         x = paste0("PC1 (", round(var_explained[1] * 100, 1), "%)"),
+         y = paste0("PC2 (", round(var_explained[2] * 100, 1), "%)"),
+         color = "Gleason Grade")
+} else {
+  p1 <- ggplot(pca_scores_clinical, aes(x = PC1, y = PC2)) +
+    geom_point(size = 4, alpha = 0.8, color = "steelblue") +
+    theme_bw() +
+    labs(title = "PCA Scores",
+         x = paste0("PC1 (", round(var_explained[1] * 100, 1), "%)"),
+         y = paste0("PC2 (", round(var_explained[2] * 100, 1), "%)"))
+}
+
+# Plot 2: PSA and Age (if available)
+if (has_psa && has_age) {
+  p2 <- ggplot(pca_scores_clinical, aes(x = PC1, y = PC2, color = PSA_Category, size = Age)) +
+    geom_point(alpha = 0.8) +
+    scale_color_brewer(palette = "RdYlBu") +
+    theme_bw() +
+    labs(title = "PCA colored by PSA Level and Age",
+         x = paste0("PC1 (", round(var_explained[1] * 100, 1), "%)"),
+         y = paste0("PC2 (", round(var_explained[2] * 100, 1), "%)"),
+         color = "PSA Level",
+         size = "Age")
+  p1 + p2
+} else if (has_age) {
+  p2 <- ggplot(pca_scores_clinical, aes(x = PC1, y = PC2, size = Age)) +
+    geom_point(alpha = 0.8, color = "steelblue") +
+    theme_bw() +
+    labs(title = "PCA colored by Age",
+         x = paste0("PC1 (", round(var_explained[1] * 100, 1), "%)"),
+         y = paste0("PC2 (", round(var_explained[2] * 100, 1), "%)"),
+         size = "Age")
+  p1 + p2
+} else {
+  print(p1)
+  cat("\nNote: PSA and/or Age data not available in clinical metadata\n")
+}
+```
+
+### Interpretation: Clinical Correlates of Spatial Phenotypes
+
+**Key Questions**:
+
+1. **Do samples cluster by clinical characteristics?**
+   - Samples with similar Gleason scores cluster together → spatial features track grade
+   - Random distribution → spatial heterogeneity independent of grade
+
+2. **Does PC1 or PC2 separate clinical groups?**
+   - Separation along PC1 → primary axis of spatial variation relates to clinical features
+   - No clear separation → spatial features provide complementary information
+
+3. **Are there grade-specific spatial phenotypes?**
+   - High grade outliers → unique aggressive TME architectures
+   - Low grade clustering → conserved well-differentiated patterns
+
+**Clinical Value**:
+
+- **Prognostic Refinement**: Spatial features may substratify within Gleason grades
+- **Treatment Selection**: TME architecture could predict therapy response
+- **Biomarker Development**: Combining grade + spatial metrics improves prediction
+
+### Immune Infiltration by Clinical Characteristics
+
+```{r immune-clinical, fig.width=12, fig.height=4, eval="Gleason_Category" %in% colnames(multiscale_clinical) && sum(!is.na(multiscale_clinical$gleason_score)) > 0}
+# Analyze immune features by clinical variables only if data available
+if ("Gleason_Category" %in% colnames(multiscale_clinical) && 
+    sum(!is.na(multiscale_clinical$gleason_score)) > 0) {
+  
+  immune_features <- multiscale_clinical[!is.na(multiscale_clinical$gleason_score) & 
+                    multiscale_clinical$Gleason_Category != "Unknown", ] %>%
+    select(patientID, Gleason_Category, T_Stage_Group,
+           matches("mean_deg_inflammatory_r\\d+")) %>%
+    pivot_longer(cols = matches("mean_deg"),
+                 names_to = "Radius",
+                 values_to = "Inflammatory_Degree") %>%
+    mutate(
+      Radius_Value = as.numeric(gsub(".*_r(\\d+)$", "\\1", Radius))
+    )
+  
+  p1 <- ggplot(immune_features, 
+         aes(x = factor(Radius_Value), y = Inflammatory_Degree, 
+             color = Gleason_Category, group = Gleason_Category)) +
+    geom_line(stat = "summary", fun = "mean", size = 1.5) +
+    geom_point(stat = "summary", fun = "mean", size = 3) +
+    scale_color_brewer(palette = "YlOrRd") +
+    theme_bw() +
+    labs(title = "Immune Infiltration Across Scales by Grade",
+         x = "Radius (μm)",
+         y = "Mean Inflammatory Degree",
+         color = "Gleason Grade")
+  
+  if ("T_Stage_Group" %in% colnames(immune_features) && 
+      sum(!is.na(immune_features$T_Stage_Group) & 
+          immune_features$T_Stage_Group != "Unknown") > 0) {
+    p2 <- ggplot(immune_features %>% filter(!is.na(T_Stage_Group) & T_Stage_Group != "Unknown"), 
+           aes(x = factor(Radius_Value), y = Inflammatory_Degree, 
+               color = T_Stage_Group, group = T_Stage_Group)) +
+      geom_line(stat = "summary", fun = "mean", size = 1.5) +
+      geom_point(stat = "summary", fun = "mean", size = 3) +
+      scale_color_brewer(palette = "Set1") +
+      theme_bw() +
+      labs(title = "Immune Infiltration Across Scales by T Stage",
+           x = "Radius (μm)",
+           y = "Mean Inflammatory Degree",
+           color = "T Stage")
+    p1 + p2
+  } else {
+    print(p1)
+  }
+} else {
+  cat("Clinical data (Gleason score) not available for immune infiltration analysis\n")
+}
+```
+
+### Interpretation: Immune Infiltration and Disease Characteristics
+
+**Clinical Context**:
+
+In prostate cancer:
+- Immune infiltration patterns vary with disease progression
+- Higher grade tumors may show different immune microenvironments
+- T stage reflects local invasion extent
+
+**Potential Patterns**:
+
+1. **Grade-dependent immune response**:
+   - Higher Gleason → may show increased or decreased immune infiltration
+   - Pattern reflects tumor immunogenicity and immune evasion
+
+2. **Stage-dependent patterns**:
+   - T3/T4 (invasive) → altered immune landscape at invasive front
+   - T2 (confined) → more organized immune response
+
+3. **Scale-dependent differences**:
+   - Small scales (20-40 μm): Direct immune-tumor interactions
+   - Large scales (80-100 μm): Tissue-level immune organization
+
+**Therapeutic Implications**:
+
+- **High immune infiltration + high mixing**: May respond to immunotherapy
+- **Low immune infiltration**: Consider immune-activating strategies
+- **Compartmentalized immunity**: Potential barriers to treatment
+
+### Degree-Mixing Relationship by Clinical Group
+
+```{r degree-mixing-clinical, fig.width=12, fig.height=8, eval="Gleason_Category" %in% colnames(multiscale_clinical) && exists("combined")}
+# Degree-mixing by Gleason score if data available
+if ("Gleason_Category" %in% colnames(multiscale_clinical) && exists("combined")) {
+  degree_mixing_clinical <- combined %>%
+    left_join(
+      multiscale_clinical %>% select(slide_id, any_of(c("Gleason_Category", "T_Stage_Group"))),
+      by = "slide_id"
+    ) %>%
+      .[!is.na(.$Gleason_Category) & .$Gleason_Category != "Unknown", ]
+  
+  if (nrow(degree_mixing_clinical) > 0) {
+    ggplot(degree_mixing_clinical, 
+           aes(x = mean_degree, y = mean_mixing, color = Gleason_Category)) +
+      geom_point(size = 3, alpha = 0.7) +
+      geom_smooth(method = "lm", se = TRUE, alpha = 0.2) +
+      facet_wrap(~ cell_type, scales = "free") +
+      scale_color_brewer(palette = "YlOrRd") +
+      theme_bw() +
+      labs(title = "Degree-Mixing Relationship by Cell Type and Gleason Score",
+           x = "Mean Degree (across scales)",
+           y = "Mean Mixing Index (across scales)",
+           color = "Gleason Grade")
+  } else {
+    cat("No data available for degree-mixing analysis by Gleason score\n")
+  }
+} else {
+  cat("Clinical data or degree-mixing data not available\n")
+}
+```
+
+### Interpretation: Degree-Mixing Relationship
+
+1. **Positive Correlation** (degree ↑, mixing ↑):
+   - More neighbors = more opportunity for diverse neighbors
+   - Dense regions tend to be more heterogeneous
+   - Common in well-mixed tissues
+
+2. **Negative Correlation** (degree ↑, mixing ↓):
+   - Dense regions are homogeneous (single cell type clusters)
+   - Sparse regions have diverse neighbors
+   - Suggests strong cell type clustering
+
+3. **No Correlation**:
+   - Density and diversity are independent
+   - Complex tissue organization
+
+**Cell Type-Specific Patterns**:
+
+**Inflammatory Cells**:
+- Often positive correlation
+- When immune infiltration increases (higher degree), more mixing occurs
+- Reflects infiltration into other compartments vs. isolated clusters
+
+**Stromal Cells**:
+- Usually weak or no correlation
+- Ubiquitous distribution regardless of density
+- Consistent mixing across tissue regions
+
+**Neoplastic Cells**:
+- Variable patterns, diagnostically important:
+  - **Positive**: Infiltrative growth (more tumor cells → more mixing with stroma)
+  - **Negative**: Expansive growth (dense tumor nests, homogeneous)
+  - Pattern correlates with prognosis in many cancers
+
+**Clinical Implications**:
+
+- **Strong correlations**: Predictable spatial organization
+  - Easier to target therapeutically
+  - Uniform treatment response expected
+
+- **Weak correlations**: Complex, heterogeneous organization
+  - Multiple spatial phenotypes coexist
+  - May require combination approaches
+
+- **Sample-specific patterns**: 
+  - Different degree-mixing relationships across samples
+  - Reflects distinct TME architectures
+  - Could define patient subgroups
+
+**Research Questions**:
+
+1. Do different relationships predict clinical outcomes?
+2. Does the relationship change with treatment?
+3. Are there cell type-specific thresholds (e.g., inflammatory degree >10 → high mixing)?
+4. Can we use the relationship to identify therapeutic vulnerabilities?
+
+# Summary and Recommendations
+
+## Key Findings
+
+This vignette demonstrated comprehensive exploratory data analysis of 
+graph-based spatial features from histopathology images integrated with 
+clinical metadata. Key findings include:
+
+1. **Graph Structure**: Analysis of cell-cell connectivity through degree 
+   and mixing indices reveals tissue organization principles
+2. **Cell Type Composition**: Distribution of different cell types and their 
+   spatial interactions define TME phenotypes
+3. **Multiscale Features**: How graph properties change across different 
+   spatial scales (20-100 μm) captures hierarchical organization
+4. **Dimensionality Reduction**: PCA reveals major sources of variation 
+   across samples and identifies spatial phenotypes
+5. **Feature Relationships**: Correlation and interaction patterns between 
+   different graph metrics suggest biological processes
+6. **Clinical Integration**: Spatial features show associations with Gleason 
+   grade, T stage, and other clinical characteristics
+7. **Prognostic Potential**: Combined spatial-clinical features may improve 
+   risk stratification beyond conventional grading
+
+## Applications
+
+These graph-based features can be used for:
+
+### Clinical Applications
+- **Enhanced Risk Stratification**: Combine Gleason grade with spatial features
+  - Identify high-risk patients within intermediate Gleason scores
+  - Refine prognosis using TME architecture
+- **Treatment Selection**: Match spatial features to therapy mechanisms
+  - High immune infiltration + high mixing → immunotherapy candidates
+  - Dense stroma + low mixing → stromal targeting + chemotherapy
+  - Grade-specific spatial patterns → tailored treatment approaches
+- **Response Prediction**: Spatial features predict treatment outcomes
+  - Immune infiltration patterns → immunotherapy response
+  - Tumor-stroma organization → chemotherapy penetration
+- **Monitoring**: Changes in spatial organization track disease progression
+  - Serial biopsies showing spatial evolution
+  - Treatment-induced TME remodeling
+- **Clinical Trial Design**: 
+  - Spatial phenotypes as inclusion criteria
+  - TME-based patient matching to therapy mechanisms
+  - Spatial biomarkers as surrogate endpoints
+
+### Research Applications
+- **Tumor Microenvironment Characterization**: Quantify TME architecture
+- **Spatial Heterogeneity Quantification**: Measure intra-tumor diversity
+- **Predictive Modeling**: Machine learning on spatial features
+- **Cohort Comparison**: Standardized metrics across studies
+- **Mechanism Discovery**: Link spatial patterns to molecular pathways
+
+## Best Practices
+
+### Feature Selection
+1. **Start with domain knowledge**: Choose features with biological rationale
+2. **Remove redundancy**: Use correlation analysis to reduce feature set
+3. **Consider multiple scales**: Different scales capture different biology
+4. **Validate consistently**: Test in independent cohorts
+
+### Interpretation Guidelines
+1. **Context matters**: Same feature means different things in different tissues
+2. **Multiple features**: No single metric captures complete picture
+3. **Quality control**: Technical artifacts can masquerade as biology
+4. **Statistical power**: Ensure adequate sample size for robust conclusions
+
+### Common Pitfalls to Avoid
+1. **Over-interpreting single samples**: Need population-level validation
+2. **Ignoring technical variation**: Batch effects, staining variation
+3. **Assuming causality**: Correlations don't imply mechanisms
+4. **Feature fishing**: Multiple testing correction for many features
+
+## Future Directions
+
+### Methodological Advances
+- **3D imaging**: Capture true spatial relationships (not just 2D sections)
+- **Temporal analysis**: Longitudinal studies of spatial evolution
+- **Multi-modal integration**: Combine spatial + molecular data
+- **Deep learning**: Automated feature discovery and interpretation
+
+### Clinical Translation
+- **Biomarker Validation**: Prospective studies linking features to outcomes
+- **Clinical Trials**: Spatial features as inclusion criteria or endpoints
+- **Diagnostic Tools**: Integration into pathology workflows
+- **Personalized Medicine**: Spatial phenotype-guided treatment decisions
+
+## Recommended Next Steps
+
+After completing this exploratory analysis:
+
+1. **Hypothesis Generation**: 
+   - Which features distinguish your samples?
+   - What biological processes might explain the patterns?
+
+2. **Statistical Testing**:
+   - Formal tests for differences between groups
+   - Correct for multiple comparisons
+
+3. **Clinical Correlation**:
+   - Link spatial features to patient outcomes
+   - Survival analysis, response rates
+
+4. **Mechanistic Studies**:
+   - Validate in experimental models
+   - Manipulate spatial organization, measure effects
+
+5. **Independent Validation**:
+   - Test findings in separate cohort
+   - Confirm reproducibility
+
+## Resources for Further Learning
+
+- **Graph Theory in Biology**: Network analysis fundamentals
+- **Spatial Statistics**: Methods for spatial data analysis
+- **Computational Pathology**: Digital pathology and AI
+- **Tumor Immunology**: TME biology and immune interactions
+- **Clinical Trial Design**: Translation of biomarkers to practice
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```

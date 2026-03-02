@@ -1,0 +1,7 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.DS_Store$
+^renv$
+^renv\.lock$
+^\.github$
+^vignettes/.*_files$

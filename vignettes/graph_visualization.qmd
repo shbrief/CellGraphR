@@ -1,0 +1,213 @@
+---
+title: "Visualizing Cell Spatial Graphs"
+author: "Sehyun Oh"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+vignette: >
+  %\VignetteIndexEntry{Graph Visualization}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+output:
+  BiocStyle::html_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    comment   = "#>",
+    collapse  = TRUE,
+    message   = FALSE,
+    warning   = FALSE,
+    fig.width = 7,
+    fig.height = 5
+)
+```
+
+# Overview
+
+This vignette demonstrates how to use the two visualization functions
+introduced in **CellGraphR**:
+
+| Function | Purpose |
+|----------|---------|
+| `buildSpatialGraph()` | Convert a nuclei list into an `igraph` for one of five spatial graph types |
+| `plotGraph()` | Render any `igraph` as a `ggplot2` figure with spatial or force-directed layout |
+
+Together they let you inspect the raw cell-graph topology on top of the
+actual tissue coordinates — before or alongside any feature extraction.
+
+# Setup
+
+```{r packages}
+library(CellGraphR)
+library(igraph)
+library(ggplot2)
+```
+
+# Simulated nuclei data {#sec-sim}
+
+Both functions work with any `igraph` object, but `buildSpatialGraph()`
+accepts the same `nuclei_list` format used by `extract_graph_features()`
+— a list where each element has a `centroid` (numeric length-2 x/y
+vector) and a `type` (character cell-type label).
+
+Here we simulate 80 cells scattered across a 500 × 500 pixel field with
+three cell types representative of a prostate tumour microenvironment.
+
+```{r sim-data}
+set.seed(123)
+n_cells  <- 80
+cell_types <- c("neoplastic", "stromal", "immune")
+
+nuclei_list <- lapply(seq_len(n_cells), function(i) {
+    list(
+        centroid = runif(2, min = 0, max = 500),
+        type     = sample(cell_types, size = 1,
+                          prob = c(0.55, 0.30, 0.15))
+    )
+})
+
+## Tabulate composition
+table(sapply(nuclei_list, `[[`, "type"))
+```
+
+# Building spatial graphs {#sec-build}
+
+`buildSpatialGraph()` constructs one of five graph representations from
+the centroid coordinates. It returns an `igraph` with `x`, `y`, and
+`type` vertex attributes — ready to pass straight to `plotGraph()`.
+
+```{r build-all}
+g_del <- buildSpatialGraph(nuclei_list, type = "delaunay")
+g_knn <- buildSpatialGraph(nuclei_list, type = "knn", k = 5)
+g_mst <- buildSpatialGraph(nuclei_list, type = "mst")
+g_gab <- buildSpatialGraph(nuclei_list, type = "gabriel")
+g_rng <- buildSpatialGraph(nuclei_list, type = "rng")
+
+## Edge counts for each representation
+data.frame(
+    type  = c("Delaunay", "5-NN", "MST", "Gabriel", "RNG"),
+    edges = c(ecount(g_del), ecount(g_knn), ecount(g_mst),
+              ecount(g_gab), ecount(g_rng))
+)
+```
+
+> **Graph type recap**
+>
+> | Type | Connectivity rule |
+> |------|-------------------|
+> | Delaunay | Adaptive distance threshold (20th-percentile cut-off); minimum degree ≥ 2 |
+> | k-NN | Mutual k-nearest neighbours (edge requires both nodes to list each other) |
+> | MST | Minimum spanning tree — the minimal connected subgraph (Prim's algorithm) |
+> | Gabriel | Edge (i,j) if no third point lies inside the disc with diameter i–j |
+> | RNG | Edge (i,j) if no third point lies in the lune between i and j |
+
+# Plotting graphs {#sec-plot}
+
+## Basic usage
+
+`plotGraph()` auto-detects `x` and `y` vertex attributes for the
+spatial layout and the `type` attribute for node colouring.
+
+```{r plot-delaunay, fig.cap="Delaunay triangulation coloured by cell type. Nodes sit at real centroid coordinates."}
+plotGraph(g_del)
+```
+
+## Customising the appearance
+
+```{r plot-knn, fig.cap="Mutual 5-NN graph. Edges are sparser than the Delaunay graph because only reciprocal neighbours are connected."}
+plotGraph(
+    g_knn,
+    color_by   = "type",
+    title      = "Mutual 5-NN graph",
+    node_size  = 2,
+    edge_alpha = 0.4
+)
+```
+
+## All five graph types
+
+Plotting each type side by side makes the structural differences
+immediately visible — from the dense Delaunay to the tree-like MST.
+
+```{r plot-mst, fig.cap="Minimum spanning tree. Every cell is reachable via exactly n-1 edges."}
+plotGraph(g_mst, title = "Minimum Spanning Tree",
+          node_size = 2, edge_alpha = 0.6)
+```
+
+```{r plot-gabriel, fig.cap="Gabriel graph. A subset of the Delaunay triangulation defined by empty-disc criterion."}
+plotGraph(g_gab, title = "Gabriel Graph", node_size = 2)
+```
+
+```{r plot-rng, fig.cap="Relative Neighborhood Graph. The sparsest proximity graph — a subgraph of the Gabriel graph."}
+plotGraph(g_rng, title = "Relative Neighborhood Graph",
+          node_size = 2, edge_alpha = 0.5)
+```
+
+# Working with real HDF5 graphs {#sec-h5}
+
+When a slide is imported with `importGraphH5()`, the resulting `igraph`
+carries the vertex attributes from the HDF5 `nodes` table — typically
+spatial coordinates and a cell-type column. Pass the coordinate and
+colour column names explicitly if auto-detection does not pick them up.
+
+```{r h5-example, eval=FALSE}
+h5_file <- system.file(
+    "extdata",
+    "TCGA-EJ-5494-01Z-00-DX1.81C6D2EB-27A6-4C08-B6BD-1DECC4C43A4B_graph.h5",
+    package = "CellGraphR"
+)
+
+g <- importGraphH5(h5_file)
+
+## Inspect what vertex attributes are available
+vertex_attr_names(g)
+
+## Plot — replace "x", "y", "cell_type" with the actual column names
+plotGraph(
+    g,
+    x_col    = "x",        # adjust to match your HDF5 schema
+    y_col    = "y",
+    color_by = "cell_type",
+    node_size  = 0.5,      # small: thousands of cells
+    edge_alpha = 0.1
+)
+```
+
+> **Tip:** For slides with tens of thousands of cells the default node
+> size of 1 can produce a dense cloud. Try `node_size = 0.3` and
+> `edge_alpha = 0.05` for a cleaner look.
+
+# Combining visualization and feature extraction {#sec-combined}
+
+`buildSpatialGraph()` and `extract_graph_features()` accept the same
+`nuclei_list`, so you can visualize the graph and extract features in
+the same workflow without duplicating the centroid data.
+
+```{r combined}
+## 1. Build the graph for visualization
+g_vis <- buildSpatialGraph(nuclei_list, type = "knn", k = 5)
+
+## 2. Extract topology features (uses the same nuclei_list)
+feats <- extract_graph_features(nuclei_list, image_dims = c(500, 500))
+
+## Feature summary for the k-NN representation (k = 5)
+unlist(feats$knn$k5)
+```
+
+```{r combined-plot, fig.cap="5-NN graph for the same cells whose features were extracted above."}
+plotGraph(g_vis,
+          title     = sprintf("5-NN graph  |  clustering coeff = %.3f",
+                              feats$knn$k5$clustering_coefficient),
+          node_size = 2)
+```
+
+# Session information {#sec-session}
+
+```{r session}
+sessionInfo()
+```

@@ -1,0 +1,465 @@
+---
+title: "Multi-modal Analysis: Cell-Graph Features with Genomic and Clinical Data"
+author: "Sehyun Oh"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+vignette: >
+  %\VignetteIndexEntry{Multi-modal Graph Feature Analysis}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+output:
+  BiocStyle::html_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    comment   = "#>",
+    collapse  = TRUE,
+    message   = FALSE,
+    warning   = FALSE,
+    fig.width = 10,
+    fig.height = 7
+)
+```
+
+# Overview
+
+This vignette demonstrates how to import cell-graph topology and
+slide-level graph features into Bioconductor objects and integrate them with 
+genomic and clinical data for downstream statistical analysis.
+
+**Data sources used:**
+
+| Layer | File(s) | R object |
+|-------|---------|----------|
+| Cell-graph topology | This package (`inst/extdata/*_graph.h5`) | `igraph` per slide |
+| Patient-level graph features | This package (`inst/extdata`) | `SummarizedExperiment` |
+| Genomic data (RNA-seq) | curatedTCGAData | `MultiAssayExperiment` |
+| Clinical metadata | curatedTCGAData `colData` | `DataFrame` |
+
+# Setup
+
+```{r packages}
+suppressPackageStartupMessages({
+    
+    ## Bioconductor
+    library(SummarizedExperiment)
+    library(MultiAssayExperiment)
+    library(S4Vectors)
+
+    ## Graph analysis
+    library(igraph)
+
+    ## Genomic data
+    library(curatedTCGAData)
+    library(TCGAutils)
+
+    ## Visualization & stats
+    library(ggplot2)
+    library(ComplexHeatmap)
+    library(survival)
+    library(survminer)
+    library(dplyr)
+})
+```
+
+## File paths
+
+```{r paths}
+dataDir <- system.file("extdata", package = "CellGraphR")
+h5_files <- list.files(dataDir, pattern = "_graph\\.h5$", full.names = TRUE)
+csv_file <- file.path(dataDir,
+                      "all_fullcohort_combined_expanded_patient_level_features_2.csv")
+
+cat("H5 graph files found:", length(h5_files), "\n")
+basename(h5_files)
+```
+
+# Import Graph Data
+
+## Cell-graph topology (`igraph`)
+
+Each `.h5` file stores the full spatial cell graph for one whole-slide
+image. `importAllGraphH5()` reads them in bulk and returns a named list
+of `igraph` objects — one per patient.
+
+```{r import-topology}
+graphs <- importAllGraphH5(h5_files, as_igraph = TRUE, verbose = TRUE)
+```
+
+Inspect a single slide's graph:
+
+```{r topology-summary}
+g <- graphs[[1]]
+
+cat("Patient:  ", igraph::graph_attr(g, "patient_id"), "\n")
+cat("Nodes:    ", igraph::vcount(g), "(cells)\n")
+cat("Edges:    ", igraph::ecount(g), "(cell-cell contacts)\n")
+cat("Density:  ", round(igraph::edge_density(g), 5), "\n")
+
+## Degree distribution
+## The degree is the total number of edges incident to a vertex.
+deg <- igraph::degree(g)
+summary(deg)
+```
+
+```{r degree-dist-plot}
+ggplot(data.frame(degree = deg), aes(x = degree)) +
+    geom_histogram(bins = 40, fill = "#2C7BB6", color = "white") +
+    labs(title = paste("Degree distribution —",
+                       igraph::graph_attr(g, "patient_id")),
+         x = "Node degree (# neighbouring cells)",
+         y = "Count") +
+    theme_bw()
+```
+
+### Per-slide graph-level summaries
+
+Compute summary statistics across all imported graphs:
+
+```{r graph-summary-table}
+graph_summary <- do.call(rbind, lapply(graphs, function(gi) {
+    data.frame(
+        patient_id       = igraph::graph_attr(gi, "patient_id"),
+        n_cells          = igraph::vcount(gi),
+        n_edges          = igraph::ecount(gi),
+        edge_density     = igraph::edge_density(gi),
+        mean_degree      = mean(igraph::degree(gi)),
+        transitivity     = igraph::transitivity(gi, type = "global"),
+        n_components     = igraph::components(gi)$no,
+        stringsAsFactors = FALSE
+    )
+}))
+rownames(graph_summary) <- graph_summary$patient_id
+print(graph_summary)
+```
+
+## Patient-level graph features (`SummarizedExperiment`)
+
+`importGraphFeatures()` reads the pre-computed CSV summary and returns a
+`SummarizedExperiment` with features as rows and patients as columns.
+Features are automatically annotated by thematic group in `rowData`.
+
+```{r import-features}
+graph_se <- importGraphFeatures(csv_file, feature_groups = TRUE)
+graph_se
+```
+
+```{r rowdata-preview}
+## Feature groups
+table(rowData(graph_se)$feature_group)
+```
+
+### Feature matrix overview
+
+```{r feature-heatmap, fig.height=10, eval=FALSE}
+mat_raw    <- as.matrix(assay(graph_se, "graph_features"))
+mat_scaled <- base::t(base::scale(base::t(mat_raw)))
+
+## Drop rows/columns that are all-NA after scaling (zero-variance or all-NA features)
+keep_rows <- rowSums(is.finite(mat_scaled)) > 0
+keep_cols <- colSums(is.finite(mat_scaled)) > 0
+mat_scaled <- mat_scaled[keep_rows, keep_cols, drop = FALSE]
+
+## Color-code columns by feature group for annotation
+row_anno <- rowAnnotation(
+    group = rowData(graph_se)$feature_group[keep_rows],
+    col   = list(group = setNames(
+        rainbow(length(unique(rowData(graph_se)$feature_group))),
+        unique(rowData(graph_se)$feature_group)))
+)
+
+Heatmap(mat_scaled,
+        name            = "z-score",
+        right_annotation = row_anno,
+        show_row_names  = FALSE,
+        show_column_names = TRUE,
+        column_title    = "Patients",
+        row_title       = paste(sum(keep_rows), "graph features"),
+        cluster_rows    = TRUE,
+        cluster_columns = TRUE)
+```
+
+
+# Multi-modal Integration
+
+## Load TCGA genomic + clinical data
+
+```{r load-tcga, eval=FALSE}
+## Download TCGA-PRAD RNA-seq and clinical data
+mae_prad <- curatedTCGAData::curatedTCGAData(
+    diseaseCode = "PRAD",
+    assays      = "RNASeq2GeneNorm*",
+    version     = "2.0.1",
+    dry.run     = FALSE
+)
+```
+
+```{r}
+mae <- mae_prad[, colnames(graph_se),]
+
+prad_pids <- colnames(graph_se)
+clin <- colData(rna_se)
+rna_mat <- assay(rna_se[[1]])
+```
+
+```{r load-tcga-show, echo=FALSE, eval=TRUE}
+## For illustration, create a minimal placeholder MAE
+set.seed(42)
+n_genes    <- 200
+prad_pids  <- colData(graph_se)$patient_id
+rna_mat    <- matrix(rpois(n_genes * length(prad_pids), lambda = 50),
+                     nrow = n_genes,
+                     dimnames = list(paste0("GENE", seq_len(n_genes)),
+                                     prad_pids))
+rna_se     <- SummarizedExperiment(assays = list(counts = rna_mat),
+                                   colData = DataFrame(patient_id = prad_pids,
+                                                       row.names = prad_pids))
+
+## Simulated clinical metadata
+clin <- DataFrame(
+    patient_id    = prad_pids,
+    gleason_score = sample(6:10, length(prad_pids), replace = TRUE),
+    pathologic_T  = sample(c("T2", "T3", "T4"), length(prad_pids), replace = TRUE),
+    days_to_death       = rexp(length(prad_pids), rate = 1/60),
+    vital_status     = rbinom(length(prad_pids), 1, 0.3),
+    row.names     = prad_pids
+)
+
+smap_rna <- DataFrame(assay   = "RNASeq2GeneNorm",
+                      primary = prad_pids,
+                      colname = prad_pids)
+
+mae_prad <- MultiAssayExperiment(
+    experiments = ExperimentList(RNASeq2GeneNorm = rna_se),
+    colData     = clin,
+    sampleMap   = smap_rna
+)
+cat("MAE created for illustration:\n")
+mae
+```
+
+## Add graph features to the MAE
+
+`addGraphToMAE()` aligns patients by ID, subsets to common samples, and
+inserts the `SummarizedExperiment` as a new experiment slot.
+
+```{r add-graph}
+mae_multi <- addGraphToMAE(mae, graph_se,
+                           experiment_name = "graph_features")
+mae_multi
+```
+
+# Downstream Statistical Analysis
+## Dimensionality reduction on graph features
+### PCA
+
+```{r pca}
+feat_mat <- assay(mae_multi[["graph_features"]])
+
+## Remove zero-variance features (common with indicator columns)
+rv      <- matrixStats::rowVars(feat_mat, na.rm = TRUE)
+feat_nz <- feat_mat[rv > 1e-8, ]
+feat_nz <- na.omit(feat_nz)
+
+pca_res <- prcomp(t(feat_nz), scale. = TRUE, center = TRUE)
+
+pca_df <- data.frame(
+    PC1        = pca_res$x[, 1],
+    PC2        = pca_res$x[, 2],
+    patient_id = rownames(pca_res$x)
+)
+pca_df <- merge(pca_df,
+                as.data.frame(colData(mae_multi)),
+                by.x = "patient_id", by.y = "row.names",
+                all.x = TRUE)
+
+var_exp <- round(100 * pca_res$sdev^2 / sum(pca_res$sdev^2), 1)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = factor(gleason_score))) +
+    geom_point(size = 3, alpha = 0.8) +
+    scale_color_brewer(palette = "RdYlBu", name = "Gleason score") +
+    labs(title = "PCA of patient-level cell-graph features",
+         x = paste0("PC1 (", var_exp[1], "%)"),
+         y = paste0("PC2 (", var_exp[2], "%)")) +
+    theme_bw()
+```
+
+```{r pca-scree}
+scree_df <- data.frame(
+    PC          = seq_along(var_exp)[seq_len(min(15, length(var_exp)))],
+    var_explained = var_exp[seq_len(min(15, length(var_exp)))]
+)
+ggplot(scree_df, aes(x = PC, y = var_explained)) +
+    geom_col(fill = "#4DAF4A") +
+    geom_line(aes(group = 1), color = "grey30") +
+    geom_point() +
+    labs(title = "Scree plot — graph features PCA",
+         x = "Principal component", y = "Variance explained (%)") +
+    theme_bw()
+```
+
+## Association with clinical variables
+
+### Kruskal-Wallis test: graph features ~ Gleason score
+
+```{r kw-test}
+clin_df     <- as.data.frame(colData(mae_multi))
+shared_pids <- intersect(colnames(feat_mat), rownames(clin_df))
+
+feat_sub  <- feat_mat[, shared_pids, drop = FALSE]
+clin_sub  <- clin_df[shared_pids, , drop = FALSE]
+
+## Test each feature
+kw_pvals <- apply(feat_sub, 1, function(x) {
+    tryCatch(
+        kruskal.test(x ~ factor(clin_sub$gleason_score))$p.value,
+        error = function(e) NA_real_
+    )
+})
+
+kw_df <- data.frame(
+    feature       = names(kw_pvals),
+    pvalue        = kw_pvals,
+    padj          = p.adjust(kw_pvals, method = "BH"),
+    feature_group = rowData(graph_se)[names(kw_pvals), "feature_group"]
+)
+kw_df <- kw_df[order(kw_df$padj), ]
+
+cat("Features significantly associated with Gleason score (FDR < 0.05):\n")
+sig_features <- kw_df[!is.na(kw_df$padj) & kw_df$padj < 0.05, ]
+print(sig_features)
+```
+
+```{r volcano-gleason}
+kw_df$neg_log10_padj <- -log10(kw_df$padj + 1e-10)
+
+ggplot(kw_df, aes(x = neg_log10_padj,
+                  y = reorder(feature, neg_log10_padj),
+                  color = feature_group)) +
+    geom_point(size = 2) +
+    geom_vline(xintercept = -log10(0.05), linetype = "dashed",
+               color = "red", linewidth = 0.7) +
+    labs(title = "Graph features associated with Gleason score",
+         x = "-log10(adjusted p-value)",
+         y = NULL, color = "Feature group") +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 7))
+```
+
+### Boxplots for top features
+
+```{r top-feature-boxplot, fig.height=5}
+# Fall back to top features by raw p-value if none survive FDR correction
+top_feats <- if (nrow(sig_features) > 0) {
+    head(sig_features$feature, 4)
+} else {
+    message("No features pass FDR < 0.05; showing top 4 by raw p-value instead.")
+    head(kw_df$feature, 4)
+}
+
+plot_df <- data.frame(
+    t(feat_sub[top_feats, , drop = FALSE]),
+    gleason = factor(clin_sub$gleason_score),
+    check.names = FALSE
+)
+
+tidyr::pivot_longer(plot_df,
+                    cols      = all_of(top_feats),
+                    names_to  = "feature",
+                    values_to = "value") |>
+    ggplot(aes(x = gleason, y = value, fill = gleason)) +
+    geom_boxplot(outlier.size = 1, alpha = 0.7) +
+    facet_wrap(~feature, scales = "free_y", ncol = 2) +
+    scale_fill_brewer(palette = "Set2") +
+    labs(title = "Top graph features by Gleason score",
+         x = "Gleason score", y = "Feature value") +
+    theme_bw() + theme(legend.position = "none")
+```
+
+## Survival analysis
+
+### Cox proportional hazards with graph-feature PCs
+
+```{r survival-cox}
+pca_pids <- intersect(shared_pids, rownames(pca_res$x))
+n_pcs    <- min(5L, ncol(pca_res$x))
+
+surv_df <- data.frame(
+    days_to_death   = clin_sub[pca_pids, "days_to_death"],
+    vital_status = clin_sub[pca_pids, "vital_status"],
+    pca_res$x[pca_pids, seq_len(n_pcs), drop = FALSE]
+)
+surv_df <- surv_df[complete.cases(surv_df), ]
+
+cox_fit <- coxph(Surv(days_to_death, vital_status) ~ .,
+                 data = surv_df)
+summary(cox_fit)
+```
+
+### Log-rank test: PC1 high vs. low
+
+```{r km-plot}
+med_pc1 <- median(surv_df$PC1)
+surv_df$pc1_group <- ifelse(surv_df$PC1 > med_pc1, "High", "Low")
+
+km_fit <- survfit(Surv(days_to_death, vital_status) ~ pc1_group, data = surv_df)
+
+ggsurvplot(km_fit,
+           data       = surv_df,
+           pval       = TRUE,
+           risk.table = TRUE,
+           palette    = c("#E41A1C", "#377EB8"),
+           title      = "Overall survival by graph-feature PC1",
+           xlab       = "Time (months)",
+           legend.labs = c("PC1 High", "PC1 Low"))
+```
+
+## Correlation with RNA-seq
+
+Correlate each graph feature with the first RNA-seq PC (as a proxy for
+transcriptomic variation).
+
+```{r rna-correlation}
+rna_mat_sub <- assay(mae_multi[["RNASeq2GeneNorm"]])[, shared_pids]
+rna_log     <- log1p(rna_mat_sub)
+rna_log     <- rna_log[apply(rna_log, 1, var) > 0, ]   # drop zero-variance genes
+rna_pc1     <- prcomp(t(rna_log), scale. = TRUE)$x[, 1]
+
+feat_rna_cor <- apply(feat_sub, 1, function(x) {
+    tryCatch(
+        cor(x, rna_pc1, use = "complete.obs", method = "spearman"),
+        error = function(e) NA_real_
+    )
+})
+
+cor_df <- data.frame(
+    feature       = names(feat_rna_cor),
+    spearman_rho  = feat_rna_cor,
+    feature_group = rowData(graph_se)[names(feat_rna_cor), "feature_group"]
+)
+cor_df <- cor_df[order(abs(cor_df$spearman_rho), decreasing = TRUE), ]
+
+cat("Top features correlated with RNA-seq PC1:\n")
+print(head(cor_df, 10))
+```
+
+```{r rna-cor-plot}
+ggplot(cor_df, aes(x = spearman_rho, fill = feature_group)) +
+    geom_histogram(bins = 30, color = "white") +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    labs(title = "Distribution of graph-feature ~ RNA-seq PC1 correlations",
+         x = "Spearman ρ", y = "Count", fill = "Feature group") +
+    theme_bw()
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
