@@ -26,10 +26,11 @@
 #' @details
 #' The \code{.h5} files use the PyTables HDF5 format written by
 #' \code{pandas.DataFrame.to_hdf()}. This function reads them via
-#' \pkg{reticulate} and Python's \code{pandas} (with the \code{tables}
-#' back-end). Ensure that a Python environment with \code{pandas >= 1.3} and
-#' \code{tables >= 3.6} is available before calling this function
-#' (e.g. \code{pip install pandas tables}).
+#' \pkg{reticulate} using \code{h5py} to access the raw HDF5 datasets and
+#' \code{pandas} to construct data frames — the \code{tables} (PyTables)
+#' back-end is \emph{not} required. Ensure that a Python environment with
+#' \code{h5py >= 3.0} and \code{pandas >= 1.3} is available before calling
+#' this function (e.g. \code{pip install h5py pandas}).
 #'
 #' @examples
 #' \dontrun{
@@ -55,10 +56,15 @@ importGraphH5 <- function(fname, as_igraph = TRUE, patient_id = NULL) {
         if (length(patient_id) == 0L) patient_id <- NA_character_
     }
 
-    pd <- reticulate::import("pandas", delay_load = FALSE)
+    h5py <- reticulate::import("h5py", delay_load = FALSE)
+    pd   <- reticulate::import("pandas", delay_load = FALSE)
+    np   <- reticulate::import("numpy", delay_load = FALSE)
 
-    nodes <- reticulate::py_to_r(pd$read_hdf(fname, key = "nodes"))
-    edges <- reticulate::py_to_r(pd$read_hdf(fname, key = "edges"))
+    hf <- h5py$File(fname, "r")
+    on.exit(hf$close(), add = TRUE)
+
+    nodes <- reticulate::py_to_r(pd$DataFrame(np$array(hf[["nodes/table"]])))
+    edges <- reticulate::py_to_r(pd$DataFrame(np$array(hf[["edges/table"]])))
 
     if (!as_igraph) {
         return(list(nodes = nodes, edges = edges, patient_id = patient_id))

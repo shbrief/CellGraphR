@@ -93,6 +93,22 @@ buildSpatialGraph <- function(nuclei_list,
 #'   Default \code{1}.
 #' @param edge_alpha Numeric(1) in \eqn{[0,1]}. Transparency of edges.
 #'   Default \code{0.3}.
+#' @param image Character(1) file path to a source image (PNG, JPEG, SVS, NDPI,
+#'   TIFF) or a pre-loaded raster array (e.g. from \code{png::readPNG}).
+#'   When provided the image is rendered as a background layer beneath the
+#'   graph.  Default \code{NULL} (no image).
+#' @param image_scale Numeric(1). Scale factor applied to vertex coordinates
+#'   before overlaying on the image.  Use this when the graph coordinates and
+#'   image pixels are at different resolutions (e.g. \code{0.5} if the image is
+#'   half the resolution of the coordinate space).  Default \code{1} (no
+#'   scaling).
+#' @param wsi_dim Numeric(2) or \code{NULL}. Width and height of the original
+#'   whole-slide image in pixels, \code{c(width, height)}.  When provided, the
+#'   exact scale factors \code{image_width / wsi_width} and
+#'   \code{image_height / wsi_height} are used to map graph coordinates
+#'   (in WSI pixel space) to the thumbnail image.  This gives pixel-accurate
+#'   alignment and is recommended over \code{image_scale} when the WSI
+#'   dimensions are known.  Default \code{NULL} (auto-detect).
 #'
 #' @return A \code{ggplot} object.
 #'
@@ -109,26 +125,24 @@ buildSpatialGraph <- function(nuclei_list,
 #' @importFrom igraph vertex_attr_names vertex_attr graph_attr as_data_frame
 #'   layout_with_fr V
 #' @importFrom ggplot2 ggplot aes geom_segment geom_point scale_colour_discrete
-#'   theme_void labs theme element_text
+#'   theme_void labs theme element_text annotation_raster scale_y_reverse
+#'   coord_cartesian
 #' @export
 plotGraph <- function(g,
-                      x_col      = NULL,
-                      y_col      = NULL,
-                      color_by   = NULL,
-                      title      = NULL,
-                      node_size  = 1,
-                      edge_alpha = 0.3) {
+                      x_col       = NULL,
+                      y_col       = NULL,
+                      color_by    = NULL,
+                      title       = NULL,
+                      node_size   = 1,
+                      edge_alpha  = 0.3,
+                      image       = NULL,
+                      image_scale = 1,
+                      wsi_dim     = NULL) {
 
     # ── 1. Resolve spatial layout ─────────────────────────────────────────────
-    vatts <- igraph::vertex_attr_names(g)
-
-    .detect <- function(candidates) {
-        found <- candidates[candidates %in% vatts]
-        if (length(found)) found[1L] else NULL
-    }
-
-    if (is.null(x_col)) x_col <- .detect(c("x", "cx", "centroid_x", "X"))
-    if (is.null(y_col)) y_col <- .detect(c("y", "cy", "centroid_y", "Y"))
+    coords <- .resolve_coord_attrs(g, x_col, y_col, required = FALSE)
+    x_col  <- coords$x_col
+    y_col  <- coords$y_col
 
     use_spatial <- !is.null(x_col) && !is.null(y_col)
 
@@ -142,14 +156,46 @@ plotGraph <- function(g,
         coords <- igraph::layout_with_fr(g)
     }
 
+    # ── 1b. Load image and apply scale ──────────────────────────────────────
+    has_image <- !is.null(image)
+    img_raster <- NULL
+    if (has_image) {
+        img_raster <- .load_image_raster(image)
+        img_h <- nrow(img_raster)
+        img_w <- ncol(img_raster)
+
+        if (!is.null(wsi_dim)) {
+            # Exact scaling from known WSI dimensions
+            coords[, 1L] <- coords[, 1L] * (img_w / wsi_dim[1L])
+            coords[, 2L] <- coords[, 2L] * (img_h / wsi_dim[2L])
+        } else if (image_scale != 1) {
+            coords[, 1L] <- coords[, 1L] * image_scale
+            coords[, 2L] <- coords[, 2L] * image_scale
+        } else {
+            # Auto-scale: map graph coordinate extent to image pixels.
+            max_x <- max(coords[, 1L], na.rm = TRUE)
+            max_y <- max(coords[, 2L], na.rm = TRUE)
+            if (max_x > img_w || max_y > img_h) {
+                auto_scale <- min(img_w / max_x, img_h / max_y)
+                coords[, 1L] <- coords[, 1L] * auto_scale
+                coords[, 2L] <- coords[, 2L] * auto_scale
+                message(sprintf(
+                    "Auto-scaled coords (factor: %.4f). ",
+                    auto_scale),
+                    "Set 'wsi_dim' for exact alignment.")
+            }
+        }
+    }
+
     # ── 2. Node data ──────────────────────────────────────────────────────────
     nodes <- data.frame(x = coords[, 1L], y = coords[, 2L],
                         stringsAsFactors = FALSE)
 
     if (is.null(color_by))
-        color_by <- .detect(c("cell_type", "type", "label"))
+        color_by <- .resolve_celltype_attr(g, required = FALSE)
 
-    has_color <- !is.null(color_by) && color_by %in% vatts
+    has_color <- !is.null(color_by) &&
+        color_by %in% igraph::vertex_attr_names(g)
     if (has_color)
         nodes$color <- as.character(igraph::vertex_attr(g, color_by))
 
@@ -177,11 +223,32 @@ plotGraph <- function(g,
     }
 
     # ── 5. Assemble ggplot ────────────────────────────────────────────────────
-    p <- ggplot2::ggplot() +
+    p <- ggplot2::ggplot()
+
+    if (has_image) {
+        # Image raster: origin at top-left, y increases downward.
+        # annotation_raster maps ymin→bottom, ymax→top, so we pass
+        # ymin=img_h and ymax=0 to flip the image correctly, then
+        # use scale_y_reverse so y=0 is at the top of the plot.
+        p <- p +
+            ggplot2::annotation_raster(
+                img_raster,
+                xmin = 0, xmax = img_w,
+                ymin = -img_h, ymax = 0
+            )
+        # Negate y coords so row 0 (image top) = plot top
+        nodes$y    <- -nodes$y
+        edges$y    <- -edges$y
+        edges$yend <- -edges$yend
+    }
+
+    p <- p +
         ggplot2::geom_segment(
             data = edges,
             ggplot2::aes(x = x, y = y, xend = xend, yend = yend),
-            colour = "grey60", alpha = edge_alpha, linewidth = 0.3
+            colour = if (has_image) "white" else "grey60",
+            alpha  = edge_alpha,
+            linewidth = 0.3
         )
 
     if (has_color) {
@@ -197,12 +264,19 @@ plotGraph <- function(g,
             ggplot2::geom_point(
                 data = nodes,
                 ggplot2::aes(x = x, y = y),
-                size = node_size, colour = "steelblue"
+                size = node_size, colour = if (has_image) "yellow" else "steelblue"
             )
     }
 
-    p +
+    p <- p +
         ggplot2::theme_void() +
         ggplot2::labs(title = title) +
         ggplot2::theme(plot.title = ggplot2::element_text(hjust = 0.5))
+
+    if (has_image)
+        p <- p + ggplot2::coord_cartesian(
+            xlim = c(0, img_w), ylim = c(-img_h, 0), expand = FALSE
+        )
+
+    p
 }

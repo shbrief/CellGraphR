@@ -37,10 +37,11 @@ optionally converts the result to an \code{igraph} object.
 \details{
 The \code{.h5} files use the PyTables HDF5 format written by
 \code{pandas.DataFrame.to_hdf()}. This function reads them via
-\pkg{reticulate} and Python's \code{pandas} (with the \code{tables}
-back-end). Ensure that a Python environment with \code{pandas >= 1.3} and
-\code{tables >= 3.6} is available before calling this function
-(e.g. \code{pip install pandas tables}).
+\pkg{reticulate} using \code{h5py} to access the raw HDF5 datasets and
+\code{pandas} to construct data frames — the \code{tables} (PyTables)
+back-end is \emph{not} required. Ensure that a Python environment with
+\code{h5py >= 3.0} and \code{pandas >= 1.3} is available before calling
+this function (e.g. \code{pip install h5py pandas}).
 }
 \examples{
 \dontrun{

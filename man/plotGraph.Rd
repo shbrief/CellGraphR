@@ -11,7 +11,10 @@ plotGraph(
   color_by = NULL,
   title = NULL,
   node_size = 1,
-  edge_alpha = 0.3
+  edge_alpha = 0.3,
+  image = NULL,
+  image_scale = 1,
+  wsi_dim = NULL
 )
 }
 \arguments{
@@ -38,6 +41,25 @@ Default \code{1}.}
 
 \item{edge_alpha}{Numeric(1) in \eqn{[0,1]}. Transparency of edges.
 Default \code{0.3}.}
+
+\item{image}{Character(1) file path to a source image (PNG, JPEG, SVS, NDPI,
+TIFF) or a pre-loaded raster array (e.g. from \code{png::readPNG}).
+When provided the image is rendered as a background layer beneath the
+graph.  Default \code{NULL} (no image).}
+
+\item{image_scale}{Numeric(1). Scale factor applied to vertex coordinates
+before overlaying on the image.  Use this when the graph coordinates and
+image pixels are at different resolutions (e.g. \code{0.5} if the image is
+half the resolution of the coordinate space).  Default \code{1} (no
+scaling).}
+
+\item{wsi_dim}{Numeric(2) or \code{NULL}. Width and height of the original
+whole-slide image in pixels, \code{c(width, height)}.  When provided, the
+exact scale factors \code{image_width / wsi_width} and
+\code{image_height / wsi_height} are used to map graph coordinates
+(in WSI pixel space) to the thumbnail image.  This gives pixel-accurate
+alignment and is recommended over \code{image_scale} when the WSI
+dimensions are known.  Default \code{NULL} (auto-detect).}
 }
 \value{
 A \code{ggplot} object.
