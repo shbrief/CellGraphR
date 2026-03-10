@@ -23,7 +23,8 @@ knitr::opts_chunk$set(
     message   = FALSE,
     warning   = FALSE,
     fig.width = 7,
-    fig.height = 5
+    fig.height = 5,
+    root.dir = "../"
 )
 ```
 
@@ -41,11 +42,12 @@ Together they let you inspect the raw cell-graph topology on top of the
 actual tissue coordinates — before or alongside any feature extraction.
 
 # Setup
-
 ```{r packages}
 library(CellGraphR)
 library(igraph)
 library(ggplot2)
+library(ImageFeatureTCGA)
+library(SpatialExperiment)
 ```
 
 # Simulated nuclei data {#sec-sim}
@@ -156,13 +158,8 @@ spatial coordinates and a cell-type column. Pass the coordinate and
 colour column names explicitly if auto-detection does not pick them up.
 
 ```{r h5-example, eval=FALSE}
-h5_file <- system.file(
-    "extdata",
-    "TCGA-EJ-5494-01Z-00-DX1.81C6D2EB-27A6-4C08-B6BD-1DECC4C43A4B_graph.h5",
-    package = "CellGraphR"
-)
-
-g <- importGraphH5(h5_file)
+graphFeatPath <- "TCGA-KK-A59Y-01Z-00-DX1.0DB9AF4D-4879-4295-A321-CBEE0FE6B2A0_graph.h5"
+g <- importGraphH5(file.path(extDir, graphFeatPath))
 
 ## Inspect what vertex attributes are available
 vertex_attr_names(g)
@@ -181,6 +178,138 @@ plotGraph(
 > **Tip:** For slides with tens of thousands of cells the default node
 > size of 1 can produce a dense cloud. Try `node_size = 0.3` and
 > `edge_alpha = 0.05` for a cleaner look.
+
+## Get coordination
+```{bash eval=FALSE}
+## Get the HoVer-Net output
+## Under `inst/extdata/` directory
+wget https://store.cancerdatasci.org/hovernet/h5ad/TCGA-KK-A59Y-01Z-00-DX1.0DB9AF4D-4879-4295-A321-CBEE0FE6B2A0.h5ad.gz
+```
+
+```{r}
+# Read and convert to SingleCellExperiment
+# extDir <- system.file("extdata", "CellGraphR")
+extDir <- "~/Packages/CellGraphR/inst/extdata"
+fpath <- "TCGA-KK-A59Y-01Z-00-DX1.0DB9AF4D-4879-4295-A321-CBEE0FE6B2A0.h5ad.gz"
+dat <- ImageFeatureTCGA::HoverNet(file.path(extDir, fpath)) |> import()
+```
+
+```{r real-coords-overlay, fig.cap="Cell graph built from real HoverNet centroid coordinates overlaid on the tissue thumbnail."}
+## obsm['spatial'] in the h5ad → reducedDim(dat, 'spatial') in the SCE
+## Each row is a cell; row number == node number in the graph
+coords     <- SpatialExperiment::spatialCoords(dat)  # n_cells × 2 (x, y)
+cell_types <- colData(dat)$type   # adjust to match actual colData column name
+
+## Whole-slide images can have > 1 M cells; subsample for practical visualisation
+set.seed(42)
+idx        <- sample(seq_len(nrow(coords)), min(10000L, nrow(coords)))
+nuclei_sub <- lapply(idx, function(i)
+    list(centroid = as.numeric(coords[i, ]), type = as.character(cell_types[i])))
+
+## Build a Delaunay spatial graph from the subsampled cells
+g_real <- buildSpatialGraph(nuclei_sub, type = "delaunay")
+
+## Locate the matching tissue thumbnail
+img_file <- file.path(extDir,
+    "TCGA-KK-A59Y-01Z-00-DX1.0DB9AF4D-4879-4295-A321-CBEE0FE6B2A0.png")
+
+## plotGraph() auto-scales coordinates to the image when graph space > image dims
+plotGraph(
+    g_real,
+    image      = img_file,
+    color_by   = "type",
+    node_size  = 0.5,
+    edge_alpha = 0.10,
+    title      = "Real-coordinate cell graph on tissue"
+)
+```
+
+# Overlaying graphs on tissue images {#sec-overlay}
+
+`plotGraph()` can render the graph directly on top of the source
+histopathology image using the `image` parameter. This section
+demonstrates four common overlay use cases with the TCGA-KK-A59Y
+example slide bundled in CellGraphR.
+
+## Load the graph and locate the image
+
+```{r overlay-setup, eval=FALSE}
+h5_file <- system.file(
+    "extdata",
+    "TCGA-KK-A59Y-01Z-00-DX1.0DB9AF4D-4879-4295-A321-CBEE0FE6B2A0_graph.h5",
+    package = "CellGraphR"
+)
+img_file <- system.file(
+    "extdata",
+    "TCGA-KK-A59Y-01Z-00-DX1.0DB9AF4D-4879-4295-A321-CBEE0FE6B2A0.png",
+    package = "CellGraphR"
+)
+
+g <- importGraphH5(h5_file)
+vertex_attr_names(g)
+```
+
+## Basic image overlay
+
+Pass a file path to `image` and the tissue tile is rendered as the
+background layer. Edge and node colours automatically adjust for
+visibility on dark backgrounds.
+
+```{r overlay-basic, eval=FALSE, fig.cap="Cell graph overlaid on the source tissue image."}
+plotGraph(g, image = img_file, node_size = 0.5, edge_alpha = 0.15)
+```
+
+## Overlay with cell-type colouring
+
+Specify `color_by` to colour nodes by a vertex attribute. This makes it
+easy to see how different cell populations are distributed across the
+tissue.
+
+```{r overlay-celltype, eval=FALSE, fig.cap="Graph overlay with nodes coloured by cell type."}
+plotGraph(
+    g,
+    image      = img_file,
+    color_by   = "type",
+    node_size  = 0.5,
+    edge_alpha = 0.15
+)
+```
+
+## Overlay with a pre-loaded raster
+
+Instead of a file path, you can pass a raster array directly — useful
+when you want to pre-process the image (e.g. crop, enhance contrast)
+before plotting.
+
+```{r overlay-raster, eval=FALSE, fig.cap="Graph overlay using a pre-loaded raster array."}
+img_arr <- png::readPNG(img_file)
+plotGraph(
+    g,
+    image      = img_arr,
+    color_by   = "type",
+    title      = "Pre-loaded raster overlay",
+    node_size  = 0.5,
+    edge_alpha = 0.15
+)
+```
+
+## Overlay with coordinate scaling
+
+When the image resolution differs from the graph coordinate space, use
+`image_scale` to align them. For example, `image_scale = 0.5` halves
+every vertex coordinate before overlaying.
+
+```{r overlay-scale, eval=FALSE, fig.cap="Graph overlay with image_scale = 0.5 (coordinates halved)."}
+plotGraph(
+    g,
+    image       = img_file,
+    color_by    = "type",
+    title       = "Scaled coordinates (0.5×)",
+    node_size   = 0.5,
+    edge_alpha  = 0.15,
+    image_scale = 0.5
+)
+```
 
 # Combining visualization and feature extraction {#sec-combined}
 

@@ -1,0 +1,425 @@
+---
+title: "Analyzing Cell Graphs with igraph"
+author: "Sehyun Oh"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+vignette: >
+  %\VignetteIndexEntry{Analyzing Cell Graphs with igraph}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+output:
+  BiocStyle::html_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    comment   = "#>",
+    collapse  = TRUE,
+    message   = FALSE,
+    warning   = FALSE,
+    fig.width = 7,
+    fig.height = 5
+)
+```
+
+# Overview
+
+This vignette demonstrates how to analyze cell spatial graphs using
+**igraph** functions directly. While CellGraphR provides import
+(`importGraphH5`) and visualization (`plotGraph`) utilities, the igraph
+package itself offers a rich set of graph algorithms for topology
+analysis, community detection, and centrality computation.
+
+We cover five practical analysis tasks:
+
+1. **Subgraph extraction** --- spatial ROI and cell-type filtering
+2. **Graph-level metrics** --- density, clustering, assortativity,
+   connected components
+3. **Community detection** --- Louvain algorithm and modularity
+4. **Cell-type interface analysis** --- mixing matrices and boundary
+   edges
+5. **Node-level metrics** --- degree, local clustering, centrality
+
+All examples use synthetic data so the vignette builds without external
+files. Code blocks marked `eval=FALSE` show the equivalent operations
+on real HDF5 graphs.
+
+# Setup
+
+```{r load-packages}
+library(CellGraphR)
+library(igraph)
+library(ggplot2)
+```
+
+## Synthetic data
+
+We generate a tissue-like spatial graph with 200 cells of four types,
+spatially clustered to mimic real tissue architecture.
+
+```{r synthetic-data}
+set.seed(42L)
+n_cells <- 200
+cell_types <- c("neoplastic", "stromal", "inflammatory", "necrotic")
+
+## Cluster centres for spatial realism
+centres <- list(
+    neoplastic   = c(250, 250),
+    stromal      = c(750, 250),
+    inflammatory = c(250, 750),
+    necrotic     = c(750, 750)
+)
+
+nuclei <- lapply(seq_len(n_cells), function(i) {
+    ct <- sample(cell_types, 1, prob = c(0.4, 0.3, 0.2, 0.1))
+    ctr <- centres[[ct]]
+    list(
+        centroid = ctr + rnorm(2, sd = 150),
+        type     = ct
+    )
+})
+
+g <- buildSpatialGraph(nuclei, type = "delaunay")
+```
+
+```{r show-graph}
+cat("Nodes:", vcount(g), "\n")
+cat("Edges:", ecount(g), "\n")
+cat("Vertex attributes:", paste(vertex_attr_names(g), collapse = ", "), "\n")
+```
+
+### Using real HDF5 data
+
+```{r real-h5, eval=FALSE}
+gz_file <- system.file(
+    "extdata",
+    "TCGA-EJ-5494-01Z-00-DX1.f466c17c-4671-45e0-aca9-0ceeec2c0280_graph.h5.gz",
+    package = "CellGraphR"
+)
+h5_file <- tempfile(fileext = ".h5")
+R.utils::gunzip(gz_file, destname = h5_file, remove = FALSE)
+g_real <- importGraphH5(h5_file)
+vertex_attr_names(g_real)
+```
+
+# Subgraph Extraction
+
+## By spatial region of interest (ROI)
+
+Extract the subgraph within a bounding box. This is useful for focusing
+on a specific tissue region --- for example, the tumour core or the
+invasion front.
+
+```{r subgraph-roi}
+## Get coordinate ranges
+x_coords <- V(g)$x
+y_coords <- V(g)$y
+cat("X range:", range(x_coords), "\n")
+cat("Y range:", range(y_coords), "\n")
+
+## Define a bounding box (lower-left quadrant)
+xmin <- min(x_coords); xmax <- median(x_coords)
+ymin <- min(y_coords); ymax <- median(y_coords)
+
+## Filter vertices within the box
+in_roi <- which(x_coords >= xmin & x_coords <= xmax &
+                y_coords >= ymin & y_coords <= ymax)
+
+g_roi <- induced_subgraph(g, in_roi)
+cat("Original:", vcount(g), "nodes,", ecount(g), "edges\n")
+cat("ROI:     ", vcount(g_roi), "nodes,", ecount(g_roi), "edges\n")
+```
+
+## By cell type
+
+Extract the subgraph containing only specific cell types. This isolates
+intra-type connectivity patterns.
+
+```{r subgraph-celltype}
+## Keep only neoplastic and stromal cells
+keep_types <- c("neoplastic", "stromal")
+vids <- which(V(g)$type %in% keep_types)
+g_sub <- induced_subgraph(g, vids)
+
+cat("Retained:", vcount(g_sub), "nodes of types:",
+    paste(keep_types, collapse = ", "), "\n")
+cat("Edges:   ", ecount(g_sub), "\n")
+
+## Cell-type composition in the subgraph
+table(V(g_sub)$type)
+```
+
+# Graph-Level Metrics
+
+igraph provides efficient, C-backed implementations of standard graph
+metrics. All functions below scale well to graphs with millions of
+nodes.
+
+```{r graph-metrics}
+metrics <- data.frame(
+    metric = c(
+        "Edge density",
+        "Global transitivity",
+        "Mean local clustering",
+        "Assortativity (cell type)",
+        "Assortativity (degree)",
+        "Connected components",
+        "Largest component fraction"
+    ),
+    value = c(
+        round(edge_density(g), 5),
+        round(transitivity(g, type = "global"), 4),
+        round(transitivity(g, type = "localaverage"), 4),
+        round(assortativity_nominal(g, factor(V(g)$type)), 4),
+        round(assortativity_degree(g), 4),
+        components(g)$no,
+        round(max(components(g)$csize) / vcount(g), 4)
+    )
+)
+knitr::kable(metrics, col.names = c("Metric", "Value"),
+             caption = "Global graph-topology metrics.")
+```
+
+## Comparing metrics across cell-type subgraphs
+
+```{r per-type-metrics}
+type_metrics <- do.call(rbind, lapply(unique(V(g)$type), function(ct) {
+    vids <- which(V(g)$type == ct)
+    if (length(vids) < 3) return(NULL)
+    gs <- induced_subgraph(g, vids)
+    data.frame(
+        cell_type    = ct,
+        n_nodes      = vcount(gs),
+        n_edges      = ecount(gs),
+        density      = round(edge_density(gs), 5),
+        transitivity = round(transitivity(gs, type = "global"), 4),
+        n_components = components(gs)$no,
+        stringsAsFactors = FALSE
+    )
+}))
+
+knitr::kable(type_metrics,
+             caption = "Graph metrics per cell-type subgraph.")
+```
+
+# Community Detection
+
+Community detection identifies densely-connected subgroups in the graph.
+The Louvain algorithm is a good default: it scales nearly linearly and
+produces high-modularity partitions.
+
+```{r community-detection}
+comm <- cluster_louvain(g)
+
+cat("Number of communities:", length(comm), "\n")
+cat("Modularity:           ", round(modularity(comm), 4), "\n")
+```
+
+```{r community-composition}
+## Community composition by cell type
+comm_table <- table(
+    community = membership(comm),
+    cell_type = V(g)$type
+)
+knitr::kable(comm_table,
+             caption = "Cell-type composition per community.")
+```
+
+```{r plot-communities, fig.cap="Graph coloured by Louvain community membership."}
+## Add community membership as a vertex attribute for plotting
+V(g)$community <- as.character(membership(comm))
+
+plotGraph(g, color_by = "community",
+          title = "Louvain communities")
+```
+
+### Alternative algorithms
+
+```{r alt-community, eval=FALSE}
+## Walktrap (random-walk based)
+comm_wt <- cluster_walktrap(g)
+
+## Fast greedy (hierarchical agglomeration)
+## Note: can be slow on very large graphs (> 100k nodes)
+comm_fg <- cluster_fast_greedy(g)
+
+## Compare modularities
+c(louvain    = modularity(comm),
+  walktrap   = modularity(comm_wt),
+  fast_greedy = modularity(comm_fg))
+```
+
+# Cell-Type Interface Analysis
+
+## Mixing matrix
+
+The mixing matrix counts edges between each pair of cell types.
+Diagonal entries represent homotypic edges (within the same type);
+off-diagonal entries represent heterotypic edges (between types).
+
+```{r mixing-matrix}
+## Get endpoint types for every edge
+edge_ends <- ends(g, E(g), names = FALSE)
+type_from <- V(g)$type[edge_ends[, 1]]
+type_to   <- V(g)$type[edge_ends[, 2]]
+
+## Build the mixing matrix
+mix_counts <- table(type_from, type_to)
+
+## Symmetrise (since the graph is undirected, (A,B) and (B,A) both appear)
+mix_mat <- as.matrix(mix_counts)
+mix_sym <- mix_mat + t(mix_mat)
+diag(mix_sym) <- diag(mix_mat)  # diagonal was already correct
+
+knitr::kable(mix_sym,
+             caption = "Edge counts between cell-type pairs.")
+```
+
+```{r mixing-fractions}
+## Normalise to edge fractions
+mix_frac <- mix_sym / ecount(g)
+knitr::kable(round(mix_frac, 4),
+             caption = "Edge fractions between cell-type pairs.")
+```
+
+## Interface edges
+
+Extract edges that connect two different cell types (heterotypic
+edges). These represent the spatial interface between cell populations.
+
+```{r interface-edges}
+## Identify heterotypic edges
+is_heterotypic <- type_from != type_to
+cat("Total edges:      ", ecount(g), "\n")
+cat("Heterotypic edges:", sum(is_heterotypic), "\n")
+cat("Heterotypic ratio:", round(mean(is_heterotypic), 4), "\n")
+```
+
+### Interface subgraph between specific types
+
+```{r interface-subgraph}
+## Extract edges between neoplastic and inflammatory cells
+is_interface <- (type_from == "neoplastic" & type_to == "inflammatory") |
+                (type_from == "inflammatory" & type_to == "neoplastic")
+
+cat("Neoplastic-inflammatory interface edges:", sum(is_interface), "\n")
+
+## Build the interface subgraph
+if (sum(is_interface) > 0) {
+    g_interface <- subgraph.edges(g, which(is_interface))
+    cat("Interface vertices:", vcount(g_interface), "\n")
+}
+```
+
+# Node-Level Metrics
+
+## Degree and local clustering
+
+```{r node-metrics}
+node_df <- data.frame(
+    node_id   = V(g)$name,
+    cell_type = V(g)$type,
+    x         = V(g)$x,
+    y         = V(g)$y,
+    degree    = degree(g),
+    clustering = transitivity(g, type = "local"),
+    stringsAsFactors = FALSE
+)
+
+head(node_df)
+```
+
+```{r degree-by-type, fig.cap="Degree distribution by cell type."}
+ggplot(node_df, aes(x = cell_type, y = degree, fill = cell_type)) +
+    geom_boxplot(show.legend = FALSE) +
+    labs(title = "Degree distribution by cell type",
+         x = "Cell type", y = "Degree") +
+    theme_bw()
+```
+
+## Per-cell-type summaries
+
+```{r type-summaries}
+type_summary <- aggregate(
+    cbind(degree, clustering) ~ cell_type,
+    data = node_df,
+    FUN = function(x) round(mean(x, na.rm = TRUE), 4)
+)
+knitr::kable(type_summary,
+             caption = "Mean degree and clustering by cell type.")
+```
+
+## Closeness centrality
+
+`closeness()` is efficient for connected graphs. For disconnected
+graphs, use `harmonic_centrality()` instead.
+
+```{r closeness}
+node_df$closeness <- closeness(g, normalized = TRUE)
+
+## Top 5 most central nodes
+top5 <- head(node_df[order(-node_df$closeness), ], 5)
+knitr::kable(top5, row.names = FALSE,
+             caption = "Top 5 nodes by closeness centrality.")
+```
+
+## Betweenness centrality
+
+> **Performance note:** `betweenness()` is O(V * E), which is
+> prohibitive for graphs with > 50k nodes. For large graphs, use
+> `estimate_betweenness(cutoff = k)` to limit path-length
+> consideration, or compute betweenness on a sampled subgraph.
+
+```{r betweenness}
+## Safe for our 200-node example
+node_df$betweenness <- betweenness(g, normalized = TRUE)
+```
+
+```{r betweenness-large, eval=FALSE}
+## For large graphs (> 50k nodes), use the cutoff variant:
+btwn <- estimate_betweenness(g_real, cutoff = 3)
+```
+
+```{r betweenness-plot, fig.cap="Betweenness centrality by cell type."}
+ggplot(node_df, aes(x = cell_type, y = betweenness, fill = cell_type)) +
+    geom_boxplot(show.legend = FALSE) +
+    labs(title = "Betweenness centrality by cell type",
+         x = "Cell type", y = "Betweenness (normalised)") +
+    theme_bw()
+```
+
+# Performance Tips for Large Graphs
+
+When working with real histopathology graphs (~1M nodes, ~1.2M edges),
+keep the following in mind:
+
+| Function | Complexity | 1M-node feasibility |
+|---|---|---|
+| `vcount()`, `ecount()`, `edge_density()` | O(1) | Instant |
+| `degree()` | O(V) | Instant |
+| `transitivity(type="global")` | O(E * sqrt(E)) | Fast (seconds) |
+| `components()` | O(V + E) | Fast |
+| `cluster_louvain()` | ~O(V log V) | Fast (seconds) |
+| `assortativity_nominal()` | O(E) | Fast |
+| `closeness()` | O(V * (V + E)) | **Slow** --- minutes to hours |
+| `betweenness()` | O(V * E) | **Infeasible** --- use `estimate_betweenness(cutoff=)` |
+| `cluster_fast_greedy()` | O(V * E * log V) | **Slow** --- prefer Louvain |
+
+**General strategy for large graphs:**
+
+1. Use `induced_subgraph()` to extract a manageable ROI first
+2. Prefer Louvain for community detection
+3. Use `estimate_betweenness(cutoff = 3)` instead of exact betweenness
+4. For closeness, compute on the largest connected component only, or
+   use `harmonic_centrality()` which handles disconnected graphs
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
