@@ -1,0 +1,12 @@
+pandoc: 3.1.11
+pkgdown: 2.2.0
+pkgdown_sha: ~
+articles:
+  EDA_prad_graph: EDA_prad_graph.html
+  graph_igraph_analysis: graph_igraph_analysis.html
+  graph_multimodal_analysis: graph_multimodal_analysis.html
+  graph_visualization: graph_visualization.html
+last_built: 2026-03-10T16:20Z
+urls:
+  reference: https://shbrief.github.io/CellGraphR/reference
+  article: https://shbrief.github.io/CellGraphR/articles
