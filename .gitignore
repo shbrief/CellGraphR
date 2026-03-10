@@ -13,3 +13,4 @@ data/
 inst/extdata/*.h5
 inst/extdata/*.h5ad
 inst/extdata/*.npy
+docs/

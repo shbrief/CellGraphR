@@ -1,0 +1,78 @@
+url: https://shbrief.github.io/CellGraphR
+
+template:
+  bootstrap: 5
+
+home:
+  title: CellGraphR
+  description: Graph Analysis for Histopathology Images
+
+navbar:
+  structure:
+    left: [intro, reference, articles, news]
+    right: [github]
+  components:
+    github:
+      icon: fab fa-github fa-lg
+      href: https://github.com/shbrief/CellGraphR
+
+reference:
+  - title: Import Graph Data
+    desc: Functions for reading graph files and features
+    contents:
+      - importGraphH5
+      - importAllGraphH5
+      - importGraphFeatures
+      - addGraphToMAE
+
+  - title: Compute Graph Features
+    desc: Topology and spectral graph metrics
+    contents:
+      - extract_graph_features
+      - extract_advanced_spatial_features
+      - compute_assortativity
+      - compute_average_path_length
+      - compute_motif_counts
+      - compute_mst_features
+      - compute_mst_diameter
+      - compute_multiscale_analysis
+      - compute_spectral_features
+      - compute_transitivity
+
+  - title: Spatial Features
+    desc: Spatial statistics derived from cell coordinates
+    contents:
+      - compute_neighborhood_features
+      - compute_nearest_neighbor_analysis
+      - compute_spatial_autocorrelation
+      - compute_spatial_clustering
+      - compute_ripley_k_analysis
+
+  - title: Graph Construction
+    desc: Build spatial graphs from coordinates
+    contents:
+      - buildSpatialGraph
+      - compute_delaunay_graph
+      - compute_gabriel_graph
+      - compute_knn_graph
+      - compute_relative_neighborhood_graph
+
+  - title: Visualization
+    desc: Plot spatial graphs and overlays
+    contents:
+      - plotGraph
+
+  - title: Statistical Testing
+    desc: Association tests with clinical and factor outcomes
+    contents:
+      - testFactorAssociations
+
+articles:
+  - title: Vignettes
+    navbar: ~
+    contents:
+      - graph_visualization
+      - graph_igraph_analysis
+      - graph_multimodal_analysis
+      - EDA_prad_graph
+      - Graph_Analysis_Report
