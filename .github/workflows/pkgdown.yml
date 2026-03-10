@@ -40,7 +40,6 @@ jobs:
           pkgdown::build_reference(pkg)
           pkgdown::build_search(pkg)
           pkgdown:::build_sitemap(pkg)
-          pkgdown:::build_news(pkg, quiet = TRUE)
         shell: Rscript {0}
 
       - name: Deploy to GitHub pages
