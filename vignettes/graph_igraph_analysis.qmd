@@ -96,13 +96,11 @@ cat("Vertex attributes:", paste(vertex_attr_names(g), collapse = ", "), "\n")
 ### Using real HDF5 data
 
 ```{r real-h5, eval=FALSE}
-gz_file <- system.file(
+h5_file <- system.file(
     "extdata",
-    "TCGA-EJ-5494-01Z-00-DX1.f466c17c-4671-45e0-aca9-0ceeec2c0280_graph.h5.gz",
+    "TCGA-EJ-5494-01Z-00-DX1.f466c17c-4671-45e0-aca9-0ceeec2c0280_graph.h5",
     package = "CellGraphR"
 )
-h5_file <- tempfile(fileext = ".h5")
-R.utils::gunzip(gz_file, destname = h5_file, remove = FALSE)
 g_real <- importGraphH5(h5_file)
 vertex_attr_names(g_real)
 ```
