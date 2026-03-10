@@ -32,8 +32,15 @@ jobs:
           extra-packages: any::pkgdown, any::quarto, local::.
           needs: website
 
-      - name: Build site
-        run: pkgdown::build_site_github_pages(new_process = FALSE, install = FALSE)
+      - name: Build site (reference + home only; articles need local data)
+        run: |
+          pkg <- pkgdown::as_pkgdown(".")
+          pkgdown::init_site(pkg)
+          pkgdown::build_home(pkg)
+          pkgdown::build_reference(pkg)
+          pkgdown::build_search(pkg)
+          pkgdown:::build_sitemap(pkg)
+          pkgdown:::build_news(pkg, quiet = TRUE)
         shell: Rscript {0}
 
       - name: Deploy to GitHub pages
