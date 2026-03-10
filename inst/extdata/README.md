@@ -1,6 +1,7 @@
 # Graph Features
 
-This directory contains cell-level graph data and patient-level graph-derived features extracted from TCGA whole-slide histopathology images.
+This directory contains cell-level graph data and patient-level graph-derived
+features extracted from TCGA whole-slide histopathology images.
 
 ## Files
 
@@ -11,15 +12,32 @@ Per-slide cell graphs stored in HDF5 format with two tables:
 - **`nodes`** — Cell-level node attributes (cell type, coordinates, etc.)
 - **`edges`** — Edge list (`source`, `target`) representing spatial adjacency between cells
 
-These can be loaded into a NetworkX graph as shown in `load_graph_sample.py`.
-
 Example slides:
 - `TCGA-EJ-5494-01Z-00-DX1.…_graph.h5` (~50 MB, ~1M cells)
 - `TCGA-KK-A59Y-01Z-00-DX1.…_graph.h5` (~47 MB, ~1M cells)
 
-### `all_fullcohort_combined_expanded_patient_level_features_2.csv`
+### AnnData File (`*.h5ad.gz`)
 
-Patient-level summary features aggregated from the cell graphs. Each row is one patient. Key feature groups include:
+- `TCGA-KK-A59Y-01Z-00-DX1.….h5ad.gz` — Compressed AnnData object for the KK-A59Y slide, suitable for use with `importGraphH5()`.
+
+### Slide Image (`*.png`)
+
+- `TCGA-KK-A59Y-01Z-00-DX1.….png` — Thumbnail of the KK-A59Y whole-slide image for visualization.
+
+### Per-Sample Feature CSVs (`TCGA-HI-7168-*`)
+
+- `TCGA-HI-7168-01Z-00-DX1.…_graph_features_summary.csv` — Cell-level graph feature summary for one slide.
+- `TCGA-HI-7168-01Z-00-DX1.…_graph_smooth_embedding.csv` — Smooth embedding coordinates for cells in the HI-7168 slide.
+
+### Cohort-Level Feature CSVs
+
+| File | Description |
+|---|---|
+| `all_fullcohort_combined_expanded_patient_level_features_2.csv` | Patient-level summary features aggregated from cell graphs. Each row is one patient. |
+| `example_graph_features.csv` | Small example graph feature table for package examples and tests. |
+| `tcga_multiscale_graph_features_per_slide.csv` | Per-slide multiscale graph features across the TCGA cohort. |
+
+#### Feature categories in the cohort CSVs
 
 | Category | Examples |
 |---|---|
@@ -32,7 +50,3 @@ Patient-level summary features aggregated from the cell graphs. Each row is one 
 | **Tumor architecture** | Island count/size, fragmentation, invasion front ratio, eccentricity |
 | **Immune microenvironment** | TIL margin fraction, immune exclusion score, immune clustering |
 | **Graph topology** | Modularity, entropy, triangle counts, connected components |
-
-### `load_graph_sample.py`
-
-Helper script demonstrating how to load an HDF5 graph file into a pandas DataFrame and NetworkX graph.
